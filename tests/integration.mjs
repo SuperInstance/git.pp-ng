@@ -181,6 +181,35 @@ async function main() {
   });
   check(unauth.status === 401, "POST /api/repos without admin key returns 401", `got ${unauth.status}`);
 
+  // --- 5. Scale project poc-scale-1 (collection-path fix) -------------------
+  // 61 repos / 62 records. Asserts the derivation is correct at scale and
+  // reports the /api/state latency the collection-path fix targets.
+  const SCALE = "poc-scale-1";
+  const tState = Date.now();
+  const scaleState = await getJson(`/api/state?project=${SCALE}`);
+  const scaleMs = Date.now() - tState;
+  if (scaleState.status !== 200 || !scaleState.body) {
+    fail(`GET /api/state?project=${SCALE} responds 200`, `status ${scaleState.status}`);
+  } else {
+    pass(`GET /api/state?project=${SCALE} responds 200`);
+    const conflicts = scaleState.body.conflicts || [];
+    const winners = Object.fromEntries(conflicts.map((c) => [c.key, c.winner]));
+    check(conflicts.length === 3, `${SCALE}: exactly 3 conflicts`, `got ${conflicts.length}`);
+    check(eq(scaleState.body.orphans, []), `${SCALE}: orphans empty`, `got ${JSON.stringify(scaleState.body.orphans)}`);
+    check(winners["config.workers"] === "t30", `${SCALE}: config.workers winner t30`, `got ${winners["config.workers"]}`);
+    check(winners["config.region"] === "t09", `${SCALE}: config.region winner t09`, `got ${winners["config.region"]}`);
+    check(winners["config.mode"] === "t59", `${SCALE}: config.mode winner t59`, `got ${winners["config.mode"]}`);
+  }
+  const scaleRecords = await getJson(`/api/records?project=${SCALE}`);
+  if (scaleRecords.status === 200 && scaleRecords.body) {
+    check(scaleRecords.body.count === 62, `${SCALE}: /api/records count 62`, `got ${scaleRecords.body.count}`);
+  } else if (scaleRecords.status === 404) {
+    pend(`${SCALE}: /api/records count 62`);
+  } else {
+    fail(`${SCALE}: /api/records responds`, `status ${scaleRecords.status}`);
+  }
+  console.log(`\n[latency] GET /api/state?project=${SCALE}: ${scaleMs} ms (collection-path target)`);
+
   // --- summary --------------------------------------------------------------
   console.log(
     `\n${passed} passed, ${failed} failed` +

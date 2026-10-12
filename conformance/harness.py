@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """Conformance harness: prove the TypeScript port (src/fold.ts) equals the
-Python referee (poc/fold.py) on every fixture we can throw at both.
+Python referee (referee/fold.py) on every fixture we can throw at both.
 
-Cases come from: the Bout 1 property tests (research/bout-1/test_fold.py),
-the stress generators (research/bout-1/stress_fold.py, copied verbatim),
-the live PoC record set (poc/scene.py), and hand-built edge cases (cycles,
-duplicate ids, unknown kinds, bool/int value collisions, unicode).
+Cases come from: property fixtures over small hand-built DAGs, randomized
+stress generators (seeded), the live record sets (conformance/live-records.json),
+and hand-built edge cases (cycles, duplicate ids, unknown kinds, bool/int value
+collisions, unicode/non-BMP ids, non-JS-safe integers, checkpoint forgery).
 
-The Python referee is the live oracle: expected outputs are computed by
-running fold.py at harness time, never hardcoded. A divergence is a bug
-in the port, by definition.
+The Python referee is the live oracle: expected outputs are computed by running
+fold.py at harness time, never hardcoded. A divergence is a bug in the port, by
+definition. Beyond the port differential, the harness also runs three property
+checks in the referee: a brute-force maximality oracle with parents-order
+invariance, the non-finite transport pin, and live-golden byte-identity.
 
 Usage: python3 harness.py [--keep]
 Exit code 0 iff all cases agree exactly (derive outputs compared with
-Python ==; verify_checkpoint booleans compared exactly).
+Python ==; verify_checkpoint booleans compared exactly) and every property
+check passes.
 """
 import importlib.util
 import itertools
@@ -25,8 +28,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SUB = HERE.parent
-# Packaged layout: referee lives at <repo>/referee/fold.py.
-# Dev layout (R&D staging): <rd>/poc/fold.py. Take whichever exists.
+# Packaged layout: referee lives at <repo>/referee/fold.py. An alternate
+# layout keeps it one level up under poc/. Take whichever exists.
 _candidates = [SUB / "referee" / "fold.py", SUB.parent / "poc" / "fold.py"]
 REFEREE = next((p for p in _candidates if p.exists()), _candidates[0])
 
@@ -90,7 +93,7 @@ def add(name, records, ats=()):
                   "probes": probes_for(recs, list(ats))})
 
 
-# --- Bout 1 fixtures (from research/bout-1/test_fold.py) -------------------
+# --- Property fixtures: small hand-built DAGs exercising each rule ---------
 base = [
     R("a", [], "task", {"x": 1, "shared": "a"}),
     R("b", ["a"], "task", {"y": 2, "shared": "b"}),
@@ -99,27 +102,27 @@ base = [
     R("o", ["c"], "override", {"shared": "o"}, reason="captain said so"),
     R("d", ["b", "o"], "task", {"w2": 1}),
 ]
-add("bout-base", base, ats=["b", "d"])
+add("prop-base", base, ats=["b", "d"])
 rng42 = random.Random(42)
 for i in range(10):
     perm = [dict(r) for r in base]
     rng42.shuffle(perm)
-    add(f"bout-base-perm{i}", perm, ats=["b"])
+    add(f"prop-base-perm{i}", perm, ats=["b"])
 ghost = base + [R("g", ["missing"], "task", {"x": 5}),
                 R("h", ["g"], "task", {"x": 6})]
-add("bout-ghost", ghost, ats=["b"])
-add("bout-p4", [R("r", [], "task", {"k": "base"}),
-                R("t", ["r"], "task", {"k": "taskval"}),
-                R("o", ["t"], "override", {"k": "over"}, reason="because"),
-                R("s", ["t"], "task", {"k": "sib"}),
-                R("g", ["o", "s"], "task", {"other": 1})], ats=["g", "o"])
+add("prop-ghost", ghost, ats=["b"])
+add("prop-override-graft", [R("r", [], "task", {"k": "base"}),
+                            R("t", ["r"], "task", {"k": "taskval"}),
+                            R("o", ["t"], "override", {"k": "over"}, reason="because"),
+                            R("s", ["t"], "task", {"k": "sib"}),
+                            R("g", ["o", "s"], "task", {"other": 1})], ats=["g", "o"])
 pair = [R("r", [], "task", {}),
         R("m", ["r"], "task", {"k": "m"}),
         R("n", ["r"], "task", {"k": "n"})]
 for i, perm in enumerate(itertools.permutations(pair)):
-    add(f"bout-p6-perm{i}", [dict(x) for x in perm], ats=["r"])
+    add(f"prop-tiebreak-perm{i}", [dict(x) for x in perm], ats=["r"])
 
-# --- Live PoC record set (poc/scene.py) ------------------------------------
+# --- Live record set (the poc-quilt-1 scene) -------------------------------
 poc = [
     R("genesis", [], "task", {"project": "poc-quilt-1", "status": "open"}),
     R("task-a", ["genesis"], "task", {"config.timeout": 30, "feature.cache": "on"}),
@@ -220,7 +223,7 @@ add("edge-wide-hotkey", [R("root", [], "task", {})] +
 
 # --- Witness-freshness cases (exercise witness_freshness / witnessFreshness).
 # The harness computes freshness for EVERY case above too (poc-live,
-# bout-base, dom-witness-desc, edge-witness-only, the stress DAGs); these add
+# prop-base, dom-witness-desc, edge-witness-only, the stress DAGs); these add
 # hand-checkable shapes with known recordsBehind. Each is also compared
 # Python-vs-TS, so a port divergence fails here exactly as a derive one would.
 # wf-linear: genesis -> w(witness) -> t1 -> t2 -> t3. Applied=5; w's past is
@@ -250,11 +253,228 @@ add("wf-orphan-witness", [R("g", [], "task", {"k": 0}),
                           R("w", ["ghost"], "witness", {"seen": 1}),
                           R("t", ["g"], "task", {"k": 1})], ats=["g"])
 
+# --- ADDENDUM #3: ancestry-reduction (exact maximality) -------------------
+# The witness-dominance repro the referee confirmed. Witnesses r->a->b all set
+# key k; c (parents [b,a] / [a,b]) also sets k. c dominates r,a,b, so exact
+# maximality is {c} and the winner is c REGARDLESS of c's parents-array order.
+# The pre-fix fold marked only the first DFS-reached ancestor, so [b,a] left
+# {b,c} contested and the witness tie-break shipped b — a parents-order flip.
+add("ancestry-witness-flip-ba", [R("r", [], "witness", {"k": "r"}),
+                                 R("a", ["r"], "witness", {"k": "a"}),
+                                 R("b", ["a"], "witness", {"k": "b"}),
+                                 R("c", ["b", "a"], "witness", {"k": "c"})],
+    ats=["c"])
+add("ancestry-witness-flip-ab", [R("r", [], "witness", {"k": "r"}),
+                                 R("a", ["r"], "witness", {"k": "a"}),
+                                 R("b", ["a"], "witness", {"k": "b"}),
+                                 R("c", ["a", "b"], "witness", {"k": "c"})],
+    ats=["c"])
+# A multi-ancestor task diamond, both parent orders, to pin maximality in the
+# task pool as well (masked pre-fix, but now exact and order-independent).
+add("ancestry-task-diamond-ba", [R("a", [], "task", {"k": "a"}),
+                                 R("b", ["a"], "task", {"k": "b"}),
+                                 R("c", ["a"], "task", {"k": "c"}),
+                                 R("d", ["b", "c"], "task", {"k": "d"})], ats=["d"])
+add("ancestry-task-diamond-ab", [R("a", [], "task", {"k": "a"}),
+                                 R("b", ["a"], "task", {"k": "b"}),
+                                 R("c", ["a"], "task", {"k": "c"}),
+                                 R("d", ["c", "b"], "task", {"k": "d"})], ats=["d"])
+
+# --- ADDENDUM #1: id ordering by Unicode code point -----------------------
+# "a￿" (BMP) vs "a\U0001F600" (astral). By code point the BMP id is
+# smaller (0xFFFF < 0x1F600) — Python's native order. The pre-fix TS compared
+# UTF-16 code units, where the astral id's leading high surrogate (0xD83D) is
+# LESS than 0xFFFF, so TS elected the opposite winner. Both now agree: the
+# contested key's winner is the lexicographically (code-point) smaller id.
+add("edge-nonbmp-id", [R("a￿", [], "task", {"k": "bmp"}),
+                       R("a\U0001F600", [], "task", {"k": "astral"})], ats=[])
+# A non-BMP effect KEY (object key order in the canonical form) — exercises the
+# code-point key sort in pyCanonical too.
+add("edge-nonbmp-key", [R("x", [], "task", {"z": 1, "a\U0001F600": 2}),
+                        R("y", [], "task", {"a￿": 3})], ats=[])
+
+# --- ADDENDUM #2: numeric domain (IEEE-754 float64) -----------------------
+# Ints above 2**53-1 are not JS-safe. The Python referee float64-canonicalises
+# them at ingest so both sides fold the same number. 2**53+1 collapses to
+# 2**53; 2**53+3 collapses to 2**53+4 (nearest even double) — distinct, so a
+# conflict. These pin agreement in both the winning value and conflict detection.
+add("edge-bigint-contested", [R("a", [], "task", {"k": 2**53 + 1}),
+                              R("b", [], "task", {"k": 2**53 + 3})], ats=[])
+add("edge-bigint-winner", [R("base", [], "task", {}),
+                           R("big", ["base"], "task", {"k": 2**53 + 1}),
+                           R("small", ["base"], "task", {"k": 7})], ats=["big"])
+# Two different large ints that collapse to the SAME double (2^53 and 2^53+1
+# both round to 9007199254740992) are NOT a conflict in either port.
+add("edge-bigint-collapse-equal", [R("a", [], "task", {"k": 2**53}),
+                                   R("b", [], "task", {"k": 2**53 + 1})], ats=[])
+
+# --- ADDENDUM #4 P1: checkpoint comparison under the float64 domain --------
+# A checkpoint asserting k=2^53+1 against a state of k=2^53. Pre-fix, TS
+# accepted (JSON.parse rounds 2^53+1 to 2^53) while the Python referee rejected
+# (exact int 2^53+1 != 2^53) — a cross-port split, and TS accepting a value it
+# could not represent. Under the declared IEEE-754 domain both values denote
+# the SAME double (9007199254740992), so verify_checkpoint canonicalises the
+# checkpoint's declared state the same way derive() canonicalises records, and
+# BOTH ports now agree. The harness compares the verify booleans, so a port
+# split fails here. (The probe is added via a dedicated records+probe case.)
+CASES.append({
+    "name": "ckpt-bigint-domain",
+    "records": [R("a", [], "task", {"k": 2**53})],
+    "probes": [
+        # same number under the domain -> accepted by both ports
+        {"at": "a", "state": {"k": 2**53 + 1}},
+        # a genuinely DISTINCT double (2^53+2 = 9007199254740994) -> rejected by both
+        {"at": "a", "state": {"k": 2**53 + 2}},
+    ],
+})
+
+# --- Live record sets: the fixed fold must reproduce the DEPLOYED golden ---
+# conformance/live-records.json holds the exact records /api/records returns
+# for poc-quilt-1 (8) and poc-scale-1 (62); the byte-identity assertion lives
+# in main() against conformance/live-golden.json. Adding them as cases also
+# runs the Python-vs-TS differential on the real data.
+_LIVE = json.loads((HERE / "live-records.json").read_text())
+for _proj, _recs in _LIVE.items():
+    add(f"live-{_proj}", _recs, ats=[])
+
+
+def _ancestors(start, parents, restrict=None):
+    """Full ancestor set of `start` (optionally restricted to `restrict`)."""
+    seen, stack = set(), list(parents.get(start, []))
+    while stack:
+        n = stack.pop()
+        if n in seen or (restrict is not None and n not in restrict):
+            continue
+        seen.add(n)
+        stack.extend(parents.get(n, []))
+    return seen
+
+
+def oracle_winners(records):
+    """Independent winner selection: BRUTE maximality (full ancestor sets) plus
+    the documented tie-break. Deliberately does NOT reuse derive()'s dominance
+    loop — it is the differential oracle the ancestry fix is checked against.
+    Shares only the orphan/index machinery (not under test) with the fold."""
+    recs = [ref._canonical_record(r) for r in records]
+    idx = ref._index(recs)
+    applied = set(derive(recs)["order"])
+    parents = {rid: ref._parents(idx[rid]) for rid in idx}
+    setters = {}
+    for rid in sorted(applied):
+        for k in ref._effects(idx[rid]):
+            setters.setdefault(k, set()).add(rid)
+    winners = {}
+    for k, cs in setters.items():
+        best = min(ref._rank(idx[c]) for c in cs)
+        pool = {c for c in cs if ref._rank(idx[c]) == best}
+        dominated = set()
+        for d in pool:
+            dominated |= (_ancestors(d, parents) & pool)
+        maximal = sorted(pool - dominated)
+        if len(maximal) == 1:
+            winners[k] = maximal[0]
+        else:
+            def clean(c):
+                anc = _ancestors(c, parents, applied)
+                intent = sum(1 for a in anc
+                             if ref._rank(idx[a]) < ref.CLASS_RANK["witness"])
+                wit = sum(1 for a in anc
+                          if ref._rank(idx[a]) == ref.CLASS_RANK["witness"])
+                return (-intent, wit, c)
+            winners[k] = min(maximal, key=clean)
+    return winners, idx
+
+
+def _permute_parents(records, rng):
+    """A copy of `records` with every multi-parent list shuffled."""
+    out = []
+    for r in records:
+        r = dict(r)
+        ps = list(r.get("parents") or [])
+        if len(ps) > 1:
+            rng.shuffle(ps)
+            r["parents"] = ps
+        out.append(r)
+    return out
+
+
+def differential_oracle():
+    """ADDENDUM #3 proof (a): for random DAGs (and the named maximality
+    fixtures), the fold's winners match the brute-force oracle, AND derive()
+    is invariant under parents-array permutation. Returns the number of checks."""
+    rng_o = random.Random(0xA11CE)
+    checks = 0
+    dags = []
+    # Reuse the stress generator's shape; witness-heavy to hit the fixed path.
+    for _ in range(300):
+        dags.append(rand_dag(rng_o.randint(2, 30)))
+    # Plus the named maximality fixtures.
+    for nm in ("ancestry-witness-flip-ba", "ancestry-witness-flip-ab",
+               "ancestry-task-diamond-ba", "ancestry-task-diamond-ab"):
+        dags.append(next(c["records"] for c in CASES if c["name"] == nm))
+    for recs in dags:
+        out = derive([dict(r) for r in recs])
+        # (i) oracle agreement: every conflict winner, and every state value.
+        winners, idx = oracle_winners(recs)
+        for c in out["conflicts"]:
+            assert winners.get(c["key"]) == c["winner"], \
+                f"oracle winner != fold winner for {c['key']}: {winners.get(c['key'])} vs {c['winner']}"
+            checks += 1
+        for k, v in out["state"].items():
+            assert k in winners, f"oracle missing key {k}"
+            assert ref._effects(idx[winners[k]]).get(k) == v, \
+                f"oracle winner value != state[{k}]"
+            checks += 1
+        # (ii) parents-order invariance over several permutations.
+        for _ in range(4):
+            perm = _permute_parents(recs, rng_o)
+            assert derive([dict(r) for r in perm]) == out, \
+                "derive() not invariant under parents-array permutation"
+            checks += 1
+    return checks
+
+
+def transport_pin():
+    """ADDENDUM: NaN/Infinity. JSON has no literal for them. The live Worker's
+    transport is JSON.parse, which REJECTS them, so they cannot reach the fold —
+    there is no divergence to fix, only an unreachability to pin. (Python's
+    json.loads is lenient and WOULD accept them; that asymmetry is a
+    collection-path finding, documented in ENGINEERING.md: a record.json a JS
+    reader rejects is silently skipped by the Worker.)"""
+    checks = 0
+    for tok in ("NaN", "Infinity", "-Infinity"):
+        probe = subprocess.run(
+            ["node", "-e",
+             f'try{{JSON.parse(\'{{"k":{tok}}}\');process.exit(1)}}catch{{process.exit(0)}}'],
+            capture_output=True, text=True, timeout=30)
+        assert probe.returncode == 0, f"expected node JSON.parse to reject {tok}"
+        checks += 1
+    return checks
+
+
+def live_golden():
+    """ADDENDUM #3 proof (b): the fixed fold reproduces the DEPLOYED derivation
+    of the live record sets byte-for-byte (state/order/conflicts/orphans)."""
+    records = json.loads((HERE / "live-records.json").read_text())
+    golden = json.loads((HERE / "live-golden.json").read_text())
+    checks = 0
+    for proj, recs in records.items():
+        got = derive([dict(r) for r in recs])
+        for field in ("state", "order", "conflicts", "orphans"):
+            assert got[field] == golden[proj][field], \
+                f"live-golden mismatch for {proj}.{field}"
+            checks += 1
+    return checks
+
 
 def main():
     cases_path = HERE / "cases.json"
     results_path = HERE / "results.ts.json"
-    cases_path.write_text(json.dumps(CASES))
+    # allow_nan=False (ADDENDUM #4 P4): bare NaN/Infinity is invalid JSON and
+    # kills the whole TS runner batch at JSON.parse. Fail loudly at
+    # construction instead — non-finite numbers are out of the record domain
+    # (see DESIGN.md §6).
+    cases_path.write_text(json.dumps(CASES, allow_nan=False))
     print(f"harness: {len(CASES)} cases, "
           f"{sum(len(c['probes']) for c in CASES)} checkpoint probes")
 
@@ -300,9 +520,24 @@ def main():
         for name, why in divergences[:20]:
             print(f"  - {name}: {why}")
         return 1
+
+    # Property checks that run in the referee (and are cross-checked Python-vs-TS
+    # by the cases above): the brute-force maximality oracle + parents-order
+    # invariance (ADDENDUM #3), the non-finite transport pin (ADDENDUM #4 P4),
+    # and the live-golden byte-identity (ADDENDUM #3 proof (b)).
+    try:
+        oracle_checks = differential_oracle()
+        pin_checks = transport_pin()
+        golden_checks = live_golden()
+    except AssertionError as e:
+        print(f"\nPROPERTY FAILURE: {e}")
+        return 1
+
     print(f"\nCONFORMANCE: {len(CASES)}/{len(CASES)} cases identical "
           f"(derive + {total_probes} checkpoint probes "
-          f"+ {total_witnesses} witness-freshness checks)")
+          f"+ {total_witnesses} witness-freshness checks); "
+          f"oracle+invariance {oracle_checks}, transport-pin {pin_checks}, "
+          f"live-golden {golden_checks} — all pass")
     return 0
 
 
