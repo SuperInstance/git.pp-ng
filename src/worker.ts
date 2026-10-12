@@ -14,7 +14,12 @@
  * Mutating routes require the X-Admin-Key header (ADMIN_KEY secret
  * binding). Read routes are public: the projection is the demo's face.
  */
-import { derive, type DeriveOutput, type FoldRecord } from "./fold.ts";
+import {
+  derive,
+  witnessFreshness,
+  type DeriveOutput,
+  type FoldRecord,
+} from "./fold.ts";
 
 // ---------------------------------------------------------------------------
 // Artifacts binding surface (as verified live by the worker spike,
@@ -266,12 +271,18 @@ interface RecordView {
   effects: unknown;
   reason: unknown;
   orphan: boolean;
+  // Per-witness staleness from witnessFreshness(): record-position distance
+  // between the witness's causal past and the applied frontier. A number on
+  // applied witness records, null on everything else (non-witnesses and
+  // orphaned/cycle-excluded witnesses, which the fold does not apply).
+  recordsBehind: number | null;
 }
 
 function buildRecordsView(
   records: FoldRecord[],
   out: DeriveOutput,
   origin: Map<string, string>,
+  freshness: { [id: string]: number },
 ): RecordView[] {
   const byId = new Map<string, FoldRecord>();
   for (const r of records) {
@@ -303,6 +314,9 @@ function buildRecordsView(
       effects: rec.effects ?? {},
       reason: rec.reason,
       orphan: orphanSet.has(id),
+      recordsBehind: Object.prototype.hasOwnProperty.call(freshness, id)
+        ? freshness[id]
+        : null,
     };
   });
 }
@@ -337,7 +351,13 @@ function renderProjection(
           ? r.parents.map((p) => esc(String(p))).join(", ")
           : "—";
       const kind = r.kind === undefined || r.kind === null ? "—" : String(r.kind);
-      const kindCell = r.orphan ? `${esc(kind)} <em>(orphan)</em>` : esc(kind);
+      const behind =
+        r.recordsBehind !== null
+          ? ` <span class="meta">(${r.recordsBehind} behind)</span>`
+          : "";
+      const kindCell = r.orphan
+        ? `${esc(kind)} <em>(orphan)</em>`
+        : esc(kind) + behind;
       const from = r.repo ? `<span class="meta">${esc(r.repo)}</span>` : "";
       return (
         `<tr><td><code>${esc(r.id)}</code>${from ? "<br>" + from : ""}</td>` +
@@ -452,7 +472,7 @@ async function handleRoot(request: Request, env: Env): Promise<Response> {
     env,
     project,
   );
-  const recordsView = buildRecordsView(records, out, origin);
+  const recordsView = buildRecordsView(records, out, origin, witnessFreshness(records));
   return new Response(
     renderProjection(project, out, recordCount, repos, recordsView),
     {
@@ -465,7 +485,7 @@ async function handleRecords(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const project = url.searchParams.get("project") ?? DEFAULT_PROJECT;
   const { out, records, repos, origin } = await projectDerivation(env, project);
-  const view = buildRecordsView(records, out, origin);
+  const view = buildRecordsView(records, out, origin, witnessFreshness(records));
   return json({ project, count: view.length, repos, records: view });
 }
 

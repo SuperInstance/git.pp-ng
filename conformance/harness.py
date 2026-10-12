@@ -218,6 +218,38 @@ add("edge-wide-hotkey", [R("root", [], "task", {})] +
     [R(f"h{i:03d}", ["root"], "task", {"hot": i}) for i in range(40)],
     ats=["root"])
 
+# --- Witness-freshness cases (exercise witness_freshness / witnessFreshness).
+# The harness computes freshness for EVERY case above too (poc-live,
+# bout-base, dom-witness-desc, edge-witness-only, the stress DAGs); these add
+# hand-checkable shapes with known recordsBehind. Each is also compared
+# Python-vs-TS, so a port divergence fails here exactly as a derive one would.
+# wf-linear: genesis -> w(witness) -> t1 -> t2 -> t3. Applied=5; w's past is
+# {genesis,w}=2, so recordsBehind(w)=3.
+add("wf-linear", [R("genesis", [], "task", {"k": 0}),
+                  R("w", ["genesis"], "witness", {"seen": 1}),
+                  R("t1", ["w"], "task", {"k": 1}),
+                  R("t2", ["t1"], "task", {"k": 2}),
+                  R("t3", ["t2"], "task", {"k": 3})], ats=["w", "t3"])
+# wf-two-witnesses: an early witness and a late one on one chain.
+# Applied=6. w-early past {g,w-early}=2 -> behind 4. w-late past
+# {g,a,b,w-late}=4 -> behind 2.
+add("wf-two-witnesses", [R("g", [], "task", {"k": 0}),
+                         R("w-early", ["g"], "witness", {"e": 1}),
+                         R("a", ["g"], "task", {"k": 1}),
+                         R("b", ["a"], "task", {"k": 2}),
+                         R("w-late", ["b"], "witness", {"l": 1}),
+                         R("c", ["b"], "task", {"k": 3})], ats=["w-early", "w-late"])
+# wf-current: a witness at the single current frontier sees everything.
+# Applied=3, w's past {g,a,w}=3 -> recordsBehind 0.
+add("wf-current", [R("g", [], "task", {"k": 0}),
+                   R("a", ["g"], "task", {"k": 1}),
+                   R("w", ["a"], "witness", {"seen": 1})], ats=["w"])
+# wf-orphan-witness: an orphaned witness is not applied, so it is absent from
+# freshness (as it is from state) — exactly the derive() exclusion.
+add("wf-orphan-witness", [R("g", [], "task", {"k": 0}),
+                          R("w", ["ghost"], "witness", {"seen": 1}),
+                          R("t", ["g"], "task", {"k": 1})], ats=["g"])
+
 
 def main():
     cases_path = HERE / "cases.json"
@@ -255,15 +287,22 @@ def main():
                     print(f"    ts: {json.dumps(got['derive'][field], sort_keys=True)[:400]}")
         if got["verify"] != exp_verify:
             divergences.append((name, f"verify differs: py={exp_verify} ts={got['verify']}"))
+        exp_fresh = ref.witness_freshness([dict(r) for r in case["records"]])
+        if got.get("freshness") != exp_fresh:
+            divergences.append(
+                (name, f"freshness differs: py={exp_fresh} ts={got.get('freshness')}"))
 
     total_probes = sum(len(c["probes"]) for c in CASES)
+    total_witnesses = sum(
+        len(ref.witness_freshness([dict(r) for r in c["records"]])) for c in CASES)
     if divergences:
         print(f"\nDIVERGENCES: {len(divergences)} case(s):")
         for name, why in divergences[:20]:
             print(f"  - {name}: {why}")
         return 1
     print(f"\nCONFORMANCE: {len(CASES)}/{len(CASES)} cases identical "
-          f"(derive + {total_probes} checkpoint probes)")
+          f"(derive + {total_probes} checkpoint probes "
+          f"+ {total_witnesses} witness-freshness checks)")
     return 0
 
 

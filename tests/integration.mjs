@@ -12,11 +12,16 @@
  *
  * Prints PASS/FAIL per assertion and exits non-zero if any assertion fails.
  *
- * Pre-deploy note: /api/records does not exist on a Worker built before this
- * change, so it answers 404. That is expected, not a test defect: the
- * records assertions are reported as PENDING ("endpoint not yet deployed")
- * and do not fail the run. Every other assertion must pass regardless, and
- * once the updated Worker is deployed the records assertions run for real.
+ * It also asserts the witness-freshness surface (prototype 1b): each applied
+ * witness record in /api/records carries a non-negative integer recordsBehind,
+ * and every non-witness record carries null.
+ *
+ * Pre-deploy note: a Worker built before a given change serves the older
+ * surface — /api/records may 404 entirely, or return records without the
+ * recordsBehind field. Both are expected, not test defects: the affected
+ * assertions are reported as PENDING ("endpoint/field not yet deployed") and
+ * do not fail the run. Every other assertion must pass regardless, and once
+ * the updated Worker is deployed the pending assertions run for real.
  */
 
 const BASE = (process.env.GITPP_BASE || "https://gitpp.casey-digennaro.workers.dev").replace(/\/+$/, "");
@@ -34,9 +39,9 @@ function fail(msg, detail) {
   failed++;
   console.log(`FAIL — ${msg}${detail ? ` (${detail})` : ""}`);
 }
-function pend(msg) {
+function pend(msg, reason = "endpoint not yet deployed") {
   pending++;
-  console.log(`PENDING — ${msg} [endpoint not yet deployed]`);
+  console.log(`PENDING — ${msg} [${reason}]`);
 }
 function check(cond, msg, detail) {
   if (cond) pass(msg);
@@ -102,6 +107,8 @@ async function main() {
   if (records.status === 404) {
     pend("GET /api/records returns 8 records");
     pend("GET /api/records includes kinds task, witness, override");
+    pend("GET /api/records: witness records carry numeric recordsBehind");
+    pend("GET /api/records: non-witness records have recordsBehind null");
   } else if (records.status !== 200 || !records.body) {
     fail("GET /api/records responds 200 with JSON", `status ${records.status}`);
   } else {
@@ -114,6 +121,40 @@ async function main() {
       "records: includes kinds task, witness, and override",
       `got ${JSON.stringify([...kinds])}`,
     );
+    // Witness freshness (prototype 1b): applied witnesses expose recordsBehind
+    // as a non-negative integer; everything else is null. A Worker built
+    // before this branch serves /api/records without the field at all — report
+    // that distinctly as PENDING (field not yet deployed), not a failure, the
+    // same way the endpoint itself was handled pre-deploy.
+    const freshnessDeployed = recs.some((r) =>
+      Object.prototype.hasOwnProperty.call(r, "recordsBehind"),
+    );
+    if (!freshnessDeployed) {
+      pend(
+        "GET /api/records: witness records carry numeric recordsBehind",
+        "field not yet deployed",
+      );
+      pend(
+        "GET /api/records: non-witness records have recordsBehind null",
+        "field not yet deployed",
+      );
+    } else {
+      const witnesses = recs.filter((r) => r.kind === "witness");
+      check(
+        witnesses.length > 0 &&
+          witnesses.every(
+            (r) => Number.isInteger(r.recordsBehind) && r.recordsBehind >= 0,
+          ),
+        "records: witness records carry numeric recordsBehind",
+        `got ${JSON.stringify(witnesses.map((r) => [r.id, r.recordsBehind]))}`,
+      );
+      check(
+        recs
+          .filter((r) => r.kind !== "witness")
+          .every((r) => r.recordsBehind === null),
+        "records: non-witness records have recordsBehind null",
+      );
+    }
   }
 
   // --- 3. GET / (HTML projection) -------------------------------------------
