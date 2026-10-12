@@ -1,5 +1,7 @@
 # git.pp — Concurrent Git Substrate
 
+**Live:** https://gitpp.casey-digennaro.workers.dev/?project=poc-quilt-1 — the derived state of a real project, recomputed from its record on every request. Raw form: https://gitpp.casey-digennaro.workers.dev/api/state?project=poc-quilt-1
+
 **One-liner:** git.pp is a Git substrate where multiple agents work on a single repository concurrently, with state derived from a task record rather than stored.
 
 ## What it is
@@ -36,7 +38,7 @@ A `witness` record carries an observation and no intent. Its uncontested observa
 
 ## Inheritance
 
-A reasoned `override` joins the record and binds its descendants, including branches forked before the override existed. This is demonstrated by the fact that a later `99` from a non-descendant branch loses to the override's `45`.
+A reasoned `override` joins the record and binds its descendants, including branches forked before the override existed. Watch it happen: in the live project above, `task-d` pushed `config.timeout: 99` *after* the override — and the derived state is still `45`, with `task-d` named in the conflict's losers. Its ancestry never passes through `override-1`, so the override binds it. Replay the whole scene yourself with `runner/scene.sh`, or read the state endpoint and check the losers list.
 
 ## Checkpoints
 

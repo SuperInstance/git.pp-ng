@@ -14,11 +14,9 @@ Try: `/?project=poc-quilt-1` (projection) · `/api/state?project=poc-quilt-1`
 ```
 src/fold.ts        the fold (derive + verifyCheckpoint), refereed port
 src/worker.ts      the front door (routes below)
-conformance/       proof the TS fold == the Python referee (poc/fold.py)
+conformance/       proof the TS fold == the Python referee (referee/fold.py)
 wrangler.toml      deploy shape (reference form; actual deploy via API)
 deploy/            the exact upload metadata + multipart spec used
-dist/worker.js     built bundle (bun build)
-BUILD-LOG.md       what was built, verified, and what surprised us
 .admin-key.local   the admin secret (mode 600, NEVER committed)
 ```
 
@@ -81,7 +79,7 @@ is no cache to invalidate.
 2. Create KV namespace `GITPP_EVENTS` (id in wrangler.toml).
 3. Multipart-upload the script with **all bindings declared in the
    upload metadata from the start** (artifacts + KV):
-   `cf_api.py PUTM /client/v4/accounts/<acct>/workers/scripts/gitpp deploy/spec.json`
+   a multipart PUT to `/client/v4/accounts/<acct>/workers/scripts/gitpp` with the script body and ALL bindings declared in the metadata (bindings omitted from an upload are wiped), or `wrangler deploy`
    (Never upload without bindings metadata — it wipes non-secret
    bindings. No existing Worker is touched by any of this.)
 4. Enable workers.dev: POST `.../scripts/gitpp/subdomain {"enabled":true}`
@@ -90,15 +88,15 @@ is no cache to invalidate.
    (re-set it after any later re-upload).
 6. Events: create queue `gitpp-events`; POST consumer
    `{"type":"worker","script_name":"gitpp"}`; POST subscription to
-   `/event_subscriptions/subscriptions` (shape in BUILD-LOG step 4).
+   `/event_subscriptions/subscriptions` (payload: source `artifacts.repo`, event `cf.artifacts.repo.pushed`).
 
 `wrangler.toml` carries the equivalent CLI configuration.
 
 ## Conformance (the fold is proven, not trusted)
 
-`poc/fold.py` (MiniMax's Bout 1 winner + Claude's grafted tie-break)
+`referee/fold.py`, the Python reference implementation of the fold,
 is the referee. `conformance/harness.py` generates 839 cases — the
-Bout 1 property fixtures, the stress suite's 200 random DAGs in
+property fixtures, a stress suite of 200 random DAGs in
 multiple orderings, the live PoC record set, and adversarial edges
 (cycles, duplicate ids, unknown kinds, bool/int value collisions,
 unicode) — computes expected outputs with the referee at run time,

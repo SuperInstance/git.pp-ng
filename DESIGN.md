@@ -5,9 +5,10 @@
 ### Inputs
 - **Record Set**: A collection of records, each containing:
   - `id`: Unique identifier for the record.
-  - `key`: The key to which the record pertains.
-  - `value`: The value associated with the key.
-  - `dependencies`: A list of record IDs that this record depends on.
+  - `parents`: A list of record IDs this record completed against — its ancestry.
+  - `kind`: One of `task` (a completion), `witness` (an observation), or `override` (a reasoned human decision).
+  - `effects`: A map of state keys to the values this record sets.
+  - `reason`: Present on overrides — the stated reason, carried in the record.
 
 ### Outputs
 - **State**: The final state after processing all records, mapping keys to their resolved values.
@@ -16,10 +17,7 @@
 - **Orphans**: A list of records that have no valid dependencies in the record set.
 
 ### VerifyCheckpoint Semantics
-- The `verifyCheckpoint` function ensures that a given checkpoint is consistent with the record set. It verifies that:
-  - The state in the checkpoint matches the state derived from the record set.
-  - The order of record processing in the checkpoint is valid given the dependencies.
-  - No conflicts or orphans are present that are not accounted for in the checkpoint.
+- `verify_checkpoint(records, checkpoint)` performs exactly one check, and it is the strong one: it re-derives state from exactly the ancestors of the record named in `checkpoint["at"]` and returns true only if that derived state equals the checkpoint's claimed state. A checkpoint that summarises anything else — a superset, a subset, a tampered value — fails. Checkpoints are therefore legal only when provenance-stamped: they name the record position they summarise and are reproducible from it.
 
 ## 2. Resolution Algorithm
 
@@ -61,16 +59,16 @@ Every step of the algorithm is a function of the record set only:
 
 ## 4. Witness-Absolute vs. Ancestry-First Reading
 
-### Witness-Absolute Reading
-- Chooses the most direct witness as the absolute authority.
-- Two independent implementations both converged on this approach after judging bouts.
+### Witness-Absolute Reading (implemented)
+- Class precedence is absolute: an `override` outranks a `task`, a `task` outranks a `witness` — even when the witness is a *descendant* of the task. An observation can never displace a completion on a contested key, no matter how recent. "Seen by us" does not overwrite "done by us"; changing a completed value takes a task, or an override that cites the witness.
+- Uncontested witness observations DO reach the state — that is their purpose: ambient truth (a disk at 93%, a load average) is part of the derived picture, labelled by kind.
 
-### Ancestry-First Reading
-- Would prioritize ancestors over witnesses.
-- If flipped to ancestry-first, the change would be minimal, encapsulated in a one-line scope adjustment.
+### Ancestry-First Reading (the alternative)
+- Would let ancestry dominate class: a descendant witness could displace its own ancestor task on the same key.
+- The flip is small and localised (the class check inside the per-key reduction), and the conformance harness would arbitrate either reading identically in both implementations.
 
 ### Rationale for Choosing Absolute
-- Witness-absolute was chosen due to its simplicity and the consensus from independent implementations.
+- The record distinguishes "done" from "seen"; letting the seen overwrite the done silently would erase exactly the distinction the record exists to keep. Absolute precedence keeps every displacement attributable: if a value changed, a task or a reasoned override changed it.
 
 ## 5. Measured Performance
 
@@ -94,6 +92,3 @@ Every step of the algorithm is a function of the record set only:
 - **No Lock**: The algorithm does not use any locks for synchronization.
 - **No Queue**: Queues are not used for processing records, except for event observability.
 - **No Resolution Service in State Path**: The state path does not include a resolution service. Queues are only used for observability of events.
-```
-
-This DESIGN.md provides a comprehensive overview of the git.pp submission, detailing the fold's contract, the resolution algorithm, the determinism argument, the rationale for design choices, performance metrics, known limitations, and a list of features that were deliberately not included.
