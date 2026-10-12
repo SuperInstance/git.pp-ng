@@ -11,7 +11,7 @@ Cloudflare Artifacts repos through it.
 - `SCENE-RUN-LOG.md` — a captured run: **26 passed, 0 failed**.
 
 **Why `pp.py` and not a shell script:** python3 is already required —
-checkpoint verification runs the Python referee (`../../poc/fold.py`),
+checkpoint verification runs the Python referee (`../referee/fold.py`),
 and the TS fold in the Worker is proven identical to it (see
 `../conformance/`). JSON authoring/parsing in pure bash means leaning
 on `jq` (not in the minimal toolset) or hand-rolled quoting around

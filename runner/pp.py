@@ -59,7 +59,7 @@ HERE = Path(__file__).resolve().parent
 WORKER = os.environ.get("PP_WORKER", "https://gitpp.casey-digennaro.workers.dev").rstrip("/")
 ACCOUNT = os.environ.get("PP_ARTIFACTS_ACCOUNT", "049ff5e84ecf636b53b162cbb580aae6")
 NS = os.environ.get("PP_ARTIFACTS_NS", "default")
-POC_DIR = Path(os.environ.get("PP_POC_DIR", HERE.parent.parent / "poc"))
+POC_DIR = Path(os.environ.get("PP_POC_DIR", HERE.parent / "referee"))
 
 GIT_IDENT = ["-c", "user.name=pp-runner", "-c", "user.email=pp@superinstance.ai"]
 
@@ -281,7 +281,7 @@ def cmd_state(args):
 
 def _load_poc():
     sys.path.insert(0, str(POC_DIR))
-    import fold  # noqa: E402  (poc/fold.py — the referee)
+    import fold  # noqa: E402  (referee/fold.py — the Python reference)
     spec = importlib.util.spec_from_file_location("poc_pp", POC_DIR / "pp.py")
     poc_pp = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(poc_pp)
