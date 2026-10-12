@@ -1,0 +1,38 @@
+# gitpp — Worker deployment config (reference form).
+#
+# The deploy performed for this build used the Cloudflare API directly
+# (multipart upload via the workspace cloudflare skill, bindings declared
+# in the upload metadata from the start — see README-BUILD.md). This file
+# is the equivalent wrangler configuration for a CLI deploy:
+#
+#   bun build src/worker.ts --outfile dist/worker.js --format=esm --target=browser
+#   wrangler deploy        (with ADMIN_KEY set: wrangler secret put ADMIN_KEY)
+#
+# ADMIN_KEY is a secret binding; its value lives only in the Worker secret
+# store and in .admin-key.local (mode 600, never committed).
+
+name = "gitpp"
+main = "dist/worker.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+[[artifacts]]
+binding = "ARTIFACTS"
+namespace = "default"
+
+# Event observability (step 4): last push-event envelope, key "last-push".
+[[kv_namespaces]]
+binding = "EVENTS"
+id = "6205d630c84e4dec885e8e8243fc2a06"
+
+# Push events: Artifacts event subscriptions deliver to a Queue; this
+# Worker is the queue's consumer (registered via
+# POST /accounts/<acct>/queues/<queue_id>/consumers {"type":"worker",
+# "script_name":"gitpp"}). Queue: gitpp-events
+# (id d58236784c854a69aa18a614a22327e1). Live subscription:
+# gitpp-poc-task-e-pushes (id 2321b5f939a64860b876545aa3fb6cb0) —
+# source artifacts.repo/default/poc-quilt-1--task-e, events ["pushed"].
+[[queues.consumers]]
+queue = "gitpp-events"
+max_batch_size = 10
+max_retries = 3
