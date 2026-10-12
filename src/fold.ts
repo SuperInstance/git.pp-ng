@@ -1,19 +1,19 @@
 /**
  * fold.ts — deterministic fold from a record of task completions to current
- * state. TypeScript port of the Python referee (poc/fold.py), which is
- * MiniMax's Bout 1 winning entry with Claude's grafted tie-break.
+ * state. TypeScript port of the Python referee (referee/fold.py), held
+ * bit-for-bit identical to it by the conformance harness in ../conformance/.
  *
- * TIE-BREAK (P6): among applied records of the same class that set the same
- * key and where none is an ancestor of another, the record whose ancestry
- * holds the most intent records (task + override) wins; if equal, the one
- * whose ancestry holds the fewest witness records; if still equal, the
- * lexicographically smallest record id.
- *
- * Class priority is ABSOLUTE: a witness never outranks a task or an
- * override, even when the witness is a descendant. Ancestry decides only
- * *within* the highest class present for that key. Record kinds outside
+ * CLASS PRIORITY is ABSOLUTE: override > task > witness. A witness never
+ * outranks a task or an override, even when the witness is a descendant —
+ * seeing a value is not deciding it. Ancestry decides only *within* the
+ * highest class present for a key. Record kinds outside
  * {"task","witness","override"} rank as witnesses, because we cannot verify
  * that they carry intent.
+ *
+ * TIE-BREAK — the cleanest chain wins: among equally-derived candidates of the
+ * same class where none is an ancestor of another, the record whose ancestry
+ * holds the most intent records (task + override); if equal, the fewest witness
+ * records; if still equal, the lexicographically (code-point) smallest id.
  *
  * Port notes (this file is verified against the Python referee by the
  * conformance harness in ../conformance/):
@@ -102,7 +102,10 @@ export function pyCanonical(value: unknown): string {
   }
   if (typeof value === "object") {
     const obj = value as { [key: string]: unknown };
-    const keys = Object.keys(obj).sort();
+    // Python json.dumps(sort_keys=True) orders keys by code point; match it so
+    // the canonical form (and the value/dup-id keys built from it) agree for
+    // non-BMP object keys too.
+    const keys = Object.keys(obj).sort(cmpCodePoints);
     return (
       "{" +
       keys.map((k) => pyEscapeString(k) + ": " + pyCanonical(obj[k])).join(", ") +
@@ -185,6 +188,28 @@ function rankOf(rec: FoldRecord): number {
   return FALLBACK_RANK;
 }
 
+/**
+ * Compare two strings by Unicode CODE POINT sequence, matching Python's native
+ * string ordering. JavaScript's built-in `<`/`>` and `Array.sort` compare by
+ * UTF-16 code UNIT, which disagrees with Python for ids/keys containing non-BMP
+ * characters: a high surrogate (U+D800–U+DBFF) sorts below a BMP char like
+ * U+FFFF under UTF-16, but the astral code point it encodes (≥ U+10000) sorts
+ * ABOVE it by code point. Every ordering in the fold that can decide an outcome
+ * (id tie-breaks, effect-key order, the Kahn heap) therefore routes through
+ * this comparator so TS and Python elect the same winner (ADDENDUM #1 fix).
+ */
+function cmpCodePoints(a: string, b: string): number {
+  const ai = Array.from(a); // iterates by code point, not UTF-16 unit
+  const bi = Array.from(b);
+  const n = Math.min(ai.length, bi.length);
+  for (let i = 0; i < n; i++) {
+    const ca = ai[i].codePointAt(0) as number;
+    const cb = bi[i].codePointAt(0) as number;
+    if (ca !== cb) return ca < cb ? -1 : 1;
+  }
+  return ai.length - bi.length;
+}
+
 /** id -> record, built in the same canonical order the Python referee
  * uses, so input permutation (and duplicate-id resolution) cannot differ. */
 function indexRecords(
@@ -193,13 +218,12 @@ function indexRecords(
   const ordered = [...records].sort((a, b) => {
     const ida = String((a as { id?: unknown }).id ?? "");
     const idb = String((b as { id?: unknown }).id ?? "");
-    if (ida < idb) return -1;
-    if (ida > idb) return 1;
-    const ca = pyCanonical(a);
-    const cb = pyCanonical(b);
-    if (ca < cb) return -1;
-    if (ca > cb) return 1;
-    return 0;
+    const byId = cmpCodePoints(ida, idb);
+    if (byId !== 0) return byId;
+    // Secondary key: Python sorts by json.dumps(..., sort_keys=True), which
+    // ensure_ascii escapes to pure ASCII; pyCanonical matches byte-for-byte,
+    // so a code-point compare here is identical to Python's.
+    return cmpCodePoints(pyCanonical(a), pyCanonical(b));
   });
   const idx: { [id: string]: FoldRecord } = {};
   for (const r of ordered) {
@@ -220,7 +244,7 @@ class MinHeap {
     let i = h.length - 1;
     while (i > 0) {
       const p = (i - 1) >> 1;
-      if (h[p] <= h[i]) break;
+      if (cmpCodePoints(h[p], h[i]) <= 0) break;
       [h[p], h[i]] = [h[i], h[p]];
       i = p;
     }
@@ -237,8 +261,8 @@ class MinHeap {
         const l = 2 * i + 1;
         const r = l + 1;
         let m = i;
-        if (l < h.length && h[l] < h[m]) m = l;
-        if (r < h.length && h[r] < h[m]) m = r;
+        if (l < h.length && cmpCodePoints(h[l], h[m]) < 0) m = l;
+        if (r < h.length && cmpCodePoints(h[r], h[m]) < 0) m = r;
         if (m === i) break;
         [h[m], h[i]] = [h[i], h[m]];
         i = m;
@@ -316,25 +340,6 @@ function topological(nodes: Set<string>, parents: ParentsMap): string[] {
   return order;
 }
 
-/** Nearest ancestor of `start` that is in `pool`, else undefined. Same
- * traversal order as fold.py's _first_ancestor_in. */
-function firstAncestorIn(
-  start: string,
-  pool: Set<string>,
-  parents: ParentsMap,
-): string | undefined {
-  const seen = new Set<string>();
-  const stack: string[] = [...parents[start]];
-  while (stack.length > 0) {
-    const n = stack.pop() as string;
-    if (seen.has(n)) continue;
-    seen.add(n);
-    if (pool.has(n)) return n;
-    for (const p of parents[n] ?? []) stack.push(p);
-  }
-  return undefined;
-}
-
 // ---------------------------------------------------------------------------
 // derive / verify_checkpoint
 // ---------------------------------------------------------------------------
@@ -379,9 +384,27 @@ export function derive(records: FoldRecord[]): DeriveOutput {
 
   const applied: string[] = [];
   for (const rid of ids) if (!orphan.has(rid)) applied.push(rid);
-  applied.sort();
+  applied.sort(cmpCodePoints);
   const appliedSet = new Set<string>(applied);
   const order = topological(new Set<string>(applied), parents);
+
+  // Full applied-ancestor set of every applied record, memoised once per call
+  // in topological order (parents precede children). anc[rid] is naturally
+  // applied-restricted: an applied record's parents are all applied, or it
+  // would itself be an orphan. Precomputing here means no ancestor walk is
+  // repeated across candidates or keys — the per-candidate re-walks were
+  // superlinear on deep contested keys (ADDENDUM #4 P5). Mirrors fold.py.
+  const anc: { [id: string]: Set<string> } = {};
+  for (const rid of order) {
+    const a = new Set<string>();
+    for (const p of parents[rid]) {
+      if (appliedSet.has(p)) {
+        a.add(p);
+        for (const x of anc[p]) a.add(x);
+      }
+    }
+    anc[rid] = a;
+  }
 
   // Who sets each key, among applied records only.
   const setters: { [key: string]: Set<string> } = {};
@@ -394,40 +417,32 @@ export function derive(records: FoldRecord[]): DeriveOutput {
 
   const state: { [key: string]: unknown } = {};
   const conflicts: Conflict[] = [];
-  for (const k of Object.keys(setters).sort()) {
-    const cands = [...setters[k]].sort();
+  for (const k of Object.keys(setters).sort(cmpCodePoints)) {
+    const cands = [...setters[k]].sort(cmpCodePoints);
     let best = Infinity;
     for (const c of cands) best = Math.min(best, rankOf(idx[c]));
     const pool = new Set<string>(cands.filter((c) => rankOf(idx[c]) === best));
-    // A candidate is dominated if it is an ANCESTOR of another candidate;
-    // the survivors are the most-derived.
+    // A candidate is dominated iff it is a (transitive) ancestor of ANY other
+    // pool candidate; the survivors are the most-derived. Exact maximality
+    // straight from the precomputed ancestor sets, so the result cannot depend
+    // on parents-array order (ADDENDUM #3 fix).
     const dominated = new Set<string>();
     for (const d of pool) {
-      const a = firstAncestorIn(d, pool, parents);
-      if (a !== undefined) dominated.add(a);
+      for (const a of anc[d]) if (pool.has(a)) dominated.add(a);
     }
-    const maximal = [...pool].filter((c) => !dominated.has(c)).sort();
+    const maximal = [...pool].filter((c) => !dominated.has(c)).sort(cmpCodePoints);
     let winner: string;
     if (maximal.length === 1) {
       winner = maximal[0];
     } else {
-      // Grafted tie-break (Claude's rule): cleanest ancestry wins.
-      const ancestorsOf = (start: string): Set<string> => {
-        const seen = new Set<string>();
-        const stack: string[] = [...parents[start]];
-        while (stack.length > 0) {
-          const n = stack.pop() as string;
-          if (seen.has(n) || !appliedSet.has(n)) continue;
-          seen.add(n);
-          for (const p of parents[n] ?? []) stack.push(p);
-        }
-        return seen;
-      };
+      // Tie-break: the cleanest chain wins — the candidate whose ancestry holds
+      // the most intent records (task + override), then the fewest witness
+      // records, then the smallest id. More deeds behind a value makes it
+      // cleaner; more bare observations, weaker.
       const cleanliness = (c: string): [number, number, string] => {
-        const anc = ancestorsOf(c);
         let intent = 0;
         let wit = 0;
-        for (const a of anc) {
+        for (const a of anc[c]) {
           const r = rankOf(idx[a]);
           if (r < WITNESS_RANK) intent += 1;
           if (r === WITNESS_RANK) wit += 1;
@@ -439,7 +454,7 @@ export function derive(records: FoldRecord[]): DeriveOutput {
         const cb = cleanliness(b);
         if (ca[0] !== cb[0]) return ca[0] - cb[0];
         if (ca[1] !== cb[1]) return ca[1] - cb[1];
-        return ca[2] < cb[2] ? -1 : ca[2] > cb[2] ? 1 : 0;
+        return cmpCodePoints(ca[2], cb[2]);
       })[0];
     }
 
@@ -450,12 +465,12 @@ export function derive(records: FoldRecord[]): DeriveOutput {
       conflicts.push({
         key: k,
         winner,
-        losers: cands.filter((c) => c !== winner).sort(),
+        losers: cands.filter((c) => c !== winner).sort(cmpCodePoints),
       });
     }
   }
 
-  const orphans = [...orphan].sort();
+  const orphans = [...orphan].sort(cmpCodePoints);
   return { state, order, conflicts, orphans };
 }
 
@@ -489,7 +504,7 @@ export function verifyCheckpoint(
     }
   }
 
-  const subset = [...closure].sort().map((rid) => idx[rid]);
+  const subset = [...closure].sort(cmpCodePoints).map((rid) => idx[rid]);
   return pyDeepEqual(derive(subset).state, want);
 }
 

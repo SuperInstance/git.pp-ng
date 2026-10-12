@@ -1,23 +1,25 @@
 """Deterministic fold from a record of task completions to current state.
 
-Base implementation: MiniMax's Bout 1 winning entry (branch minimax/fold,
-fold-bout repo), used under the bout's terms as the build seed.
+This is the reference implementation; src/fold.ts is the TypeScript port the
+Worker runs, held bit-for-bit identical by the conformance harness.
 
-GRAFT (Bout 1 referee recommendation, 2026-10-11): the tie-break is
-Claude's (chat entry) provenance-cleanliness rule, replacing the
-depth rule:
+Resolution, per key:
 
-TIE-BREAK (P6): among applied records of the same class that set the same key
-and where none is an ancestor of another, the record whose ancestry holds the
-most intent records (task + override) wins; if equal, the one whose ancestry
-holds the fewest witness records; if still equal, the lexicographically
-smallest record id. ("Cleanest chain" made arithmetic: more deeds behind
-you is cleaner; more mere observations behind you is weaker.)
+CLASS PRIORITY is ABSOLUTE. override > task > witness. A witness never outranks
+a task or an override, even when the witness is a descendant: seeing a value is
+not deciding it. Ancestry decides only *within* the highest class present for a
+key. Record kinds outside {"task","witness","override"} rank as witnesses — we
+cannot verify that they carry intent.
 
-Class priority is ABSOLUTE: a witness never outranks a task or an override, even
-when the witness is a descendant. Ancestry decides only *within* the highest class
-present for that key. Record kinds outside {"task","witness","override"} are ranked
-as witnesses, because we cannot verify that they carry intent.
+MAXIMALITY. Within that class, a candidate dominated by another (it is a
+transitive ancestor of a fellow candidate) is superseded; only the most-derived
+survive.
+
+TIE-BREAK — the cleanest chain wins. Among surviving candidates where none is an
+ancestor of another, prefer the record whose ancestry holds the most intent
+records (task + override); if equal, the fewest witness records; if still equal,
+the lexicographically smallest id. More deeds behind a value makes it cleaner;
+more bare observations, weaker.
 """
 
 import heapq
@@ -26,6 +28,39 @@ import json
 # Lower is stronger. Unknown kinds fall to the most humble class (see docstring).
 CLASS_RANK = {"override": 0, "task": 1, "witness": 2}
 _FALLBACK_RANK = 2
+
+# Record numbers are JSON values, which the JS side (the live Worker) holds as
+# IEEE-754 float64. Integers outside the JS safe range round when they cross
+# JSON.parse (9007199254740993 -> 9007199254740992), so an int above 2**53-1 is
+# not representable identically on both sides. The referee canonicalises every
+# such int to float64 AT INGEST, so Python and TypeScript fold the same number
+# bit-for-bit. Safe-range ints (every value in the live record sets) are left
+# as-is, so derived state for poc-quilt-1 / poc-scale-1 is byte-identical.
+_JS_SAFE_INT = 2**53 - 1
+
+
+def _canon_num(v):
+    """float64-canonicalise non-JS-safe integers, recursively through containers.
+    bool is left alone (it is an int subclass but a distinct JSON type)."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int) and not (-_JS_SAFE_INT <= v <= _JS_SAFE_INT):
+        return float(v)
+    if isinstance(v, list):
+        return [_canon_num(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _canon_num(x) for k, x in v.items()}
+    return v
+
+
+def _canonical_record(rec):
+    """A record with its effect values float64-canonicalised (see _canon_num)."""
+    eff = rec.get("effects")
+    if not isinstance(eff, dict):
+        return rec
+    out = dict(rec)
+    out["effects"] = {k: _canon_num(v) for k, v in eff.items()}
+    return out
 
 
 def _index(records):
@@ -92,23 +127,8 @@ def _topological(nodes, parents):
     return order
 
 
-def _first_ancestor_in(start, pool, parents):
-    """Nearest ancestor of `start` that is in `pool`, else None. Stops at the first hit."""
-    seen = set()
-    stack = list(parents[start])
-    while stack:
-        n = stack.pop()
-        if n in seen:
-            continue
-        seen.add(n)
-        if n in pool:
-            return n
-        stack.extend(parents.get(n, ()))
-    return None
-
-
 def derive(records):
-    records = list(records)
+    records = [_canonical_record(r) for r in records]
     idx = _index(records)
     ids = set(idx)
     parents = {rid: _parents(rec) for rid, rec in idx.items()}
@@ -138,10 +158,20 @@ def derive(records):
     applied_set = set(applied)
     order = _topological(applied, parents)
 
-    depth = {}
+    # Full applied-ancestor set of every applied record, memoised once per call
+    # in topological order (parents precede children). anc[rid] is naturally
+    # applied-restricted: an applied record's parents are all applied, or it
+    # would itself be an orphan. Precomputing here means no ancestor walk is
+    # repeated across candidates or keys — the per-candidate re-walks were
+    # superlinear on deep contested keys (ADDENDUM #4 P5).
+    anc = {}
     for rid in order:
-        ps = parents[rid]
-        depth[rid] = max((depth[p] for p in ps), default=-1) + 1
+        a = set()
+        for p in parents[rid]:
+            if p in applied_set:
+                a.add(p)
+                a |= anc[p]
+        anc[rid] = a
 
     # Who sets each key, among applied records only.
     setters = {}
@@ -155,33 +185,25 @@ def derive(records):
         cands = sorted(setters[k])
         best = min(_rank(idx[c]) for c in cands)
         pool = {c for c in cands if _rank(idx[c]) == best}
-        # A candidate is dominated if it is an ANCESTOR of another candidate; the
-        # survivors are the most-derived. Walk up from each d to find the pool-member
-        # that d supersedes, and mark it dominated.
+        # A candidate is dominated iff it is a (transitive) ancestor of ANY
+        # other pool candidate; the survivors are the most-derived. Exact
+        # maximality straight from the precomputed ancestor sets, so the result
+        # cannot depend on parents-array order (ADDENDUM #3 fix).
         dominated = set()
         for d in pool:
-            a = _first_ancestor_in(d, pool, parents)
-            if a is not None:
-                dominated.add(a)
+            dominated |= anc[d] & pool
         maximal = sorted(pool - dominated)
         if len(maximal) == 1:
             winner = maximal[0]
         else:
-            # Grafted tie-break (Claude's rule): cleanest ancestry wins.
-            def _ancestors(start):
-                seen, stack = set(), list(parents[start])
-                while stack:
-                    n = stack.pop()
-                    if n in seen or n not in applied_set:
-                        continue
-                    seen.add(n)
-                    stack.extend(parents.get(n, ()))
-                return seen
-
+            # Tie-break: the cleanest chain wins. Among equally-derived
+            # candidates of the same class, prefer the one whose ancestry holds
+            # the most intent records (task + override), then the fewest witness
+            # records, then the lexicographically smallest id — more deeds
+            # behind a value makes it cleaner; more bare observations, weaker.
             def _cleanliness(c):
-                anc = _ancestors(c)
-                intent = sum(1 for a in anc if _rank(idx[a]) < CLASS_RANK["witness"])
-                wit = sum(1 for a in anc if _rank(idx[a]) == CLASS_RANK["witness"])
+                intent = sum(1 for a in anc[c] if _rank(idx[a]) < CLASS_RANK["witness"])
+                wit = sum(1 for a in anc[c] if _rank(idx[a]) == CLASS_RANK["witness"])
                 return (-intent, wit, c)
 
             winner = min(maximal, key=_cleanliness)
@@ -210,6 +232,14 @@ def verify_checkpoint(records, checkpoint):
     if at is None or not isinstance(want, dict):
         return False
     at = str(at)
+    # Compare the declared state in the SAME number domain the fold uses:
+    # float64-canonicalise the checkpoint's values exactly as derive()
+    # canonicalises record effects. Without this the referee compares a
+    # non-JS-safe int exactly while the TS port has already rounded it at
+    # JSON.parse, so the same checkpoint verifies differently in the two ports
+    # (ADDENDUM #4 P1). A value that denotes a DISTINCT double is still
+    # rejected; one that denotes the same double is accepted, identically.
+    want = {k: _canon_num(v) for k, v in want.items()}
 
     idx = _index(records)
     if at not in idx:

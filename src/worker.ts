@@ -168,6 +168,46 @@ function commitIds(logResult: unknown): string[] {
 // P--* (the task's record.json at HEAD). Dedupe by record id.
 // ---------------------------------------------------------------------------
 
+// Blob reads dominate collection latency: one awaited readFile/log per repo,
+// run sequentially, is ~N network round-trips (poc-scale-1: 61 repos, ~14-28s
+// warm, while the fold itself is ~12ms). We fetch the blobs with bounded
+// concurrency but still INGEST them in the original deterministic order, so
+// dedupe ("first-seen wins"), origin attribution, the records array, and every
+// derived output stay byte-identical to the sequential version.
+const COLLECT_CONCURRENCY = 24;
+
+/** Resolve `fn` over `items` with at most `limit` in flight, writing each
+ * result at its item's index (so the output is order-preserving regardless of
+ * completion order). `fn` must not reject — callers return null on failure. */
+async function mapBounded<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < Math.min(limit, items.length); w++) {
+    workers.push(
+      (async () => {
+        for (;;) {
+          const i = next++;
+          if (i >= items.length) return;
+          results[i] = await fn(items[i]);
+        }
+      })(),
+    );
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+interface CollectionWarning {
+  id: string;
+  keptFrom: string | null;
+  droppedFrom: string;
+}
+
 async function collectProject(
   env: Env,
   project: string,
@@ -175,6 +215,7 @@ async function collectProject(
   records: FoldRecord[];
   repos: string[];
   origin: Map<string, string>;
+  warnings: CollectionWarning[];
 }> {
   const all = await listAllRepos(env);
   const names = all
@@ -185,28 +226,14 @@ async function collectProject(
     )
     .sort();
 
-  const byId = new Map<string, FoldRecord>();
-  // record id -> the repo the record was first collected from. First-seen
-  // wins, exactly as the dedupe below does, so the project repo (walked
-  // first) is credited for records that also appear at a task HEAD.
-  const origin = new Map<string, string>();
-  const addBlob = async (
-    blob: Blob | null,
-    repoName: string,
-  ): Promise<void> => {
-    if (!blob) return;
-    try {
-      const rec = JSON.parse(await blob.text()) as FoldRecord;
-      if (rec && typeof rec.id === "string" && !byId.has(rec.id)) {
-        byId.set(rec.id, rec);
-        origin.set(rec.id, repoName);
-      }
-    } catch {
-      /* not a record — skip silently */
-    }
-  };
+  // Ordered read plan: project-repo commits first (in deterministic log order),
+  // then task repos in sorted name order. Each entry reads one record.json to
+  // text, catching everything so a failed read becomes null (skipped), exactly
+  // as the sequential version skipped a throw or a null blob.
+  const plan: { repo: string; read: () => Promise<string | null> }[] = [];
 
-  // Project repo: every commit carries one record.
+  // Project repo: enumerate commits first (one get + one log — sequential, as
+  // the reads below depend on the commit list).
   try {
     const repo = await env.ARTIFACTS.get(project);
     let commits: string[] = [];
@@ -217,11 +244,17 @@ async function collectProject(
     }
     if (commits.length === 0) commits = ["main"];
     for (const c of commits) {
-      try {
-        await addBlob(await repo.readFile({ ref: c, path: "record.json" }), project);
-      } catch {
-        /* missing record.json at this ref — skip */
-      }
+      plan.push({
+        repo: project,
+        read: async () => {
+          try {
+            const b = await repo.readFile({ ref: c, path: "record.json" });
+            return b ? await b.text() : null;
+          } catch {
+            return null;
+          }
+        },
+      });
     }
   } catch {
     /* project repo missing/unready — derive over what exists */
@@ -230,15 +263,62 @@ async function collectProject(
   // Task repos: the task's record at HEAD.
   for (const name of names) {
     if (name === project) continue;
+    plan.push({
+      repo: name,
+      read: async () => {
+        try {
+          const repo = await env.ARTIFACTS.get(name);
+          const b = await repo.readFile({ ref: "main", path: "record.json" });
+          return b ? await b.text() : null;
+        } catch {
+          return null;
+        }
+      },
+    });
+  }
+
+  // Fetch concurrently (results stay index-aligned), then ingest IN ORDER.
+  const texts = await mapBounded(plan, COLLECT_CONCURRENCY, (p) => p.read());
+
+  const byId = new Map<string, FoldRecord>();
+  // record id -> the repo the record was first collected from. First-seen
+  // wins, exactly as the dedupe below does, so the project repo (ingested
+  // first) is credited for records that also appear at a task HEAD.
+  const origin = new Map<string, string>();
+  // Normalized JSON of the kept record per id, to tell a harmless duplicate
+  // (the same record seen in the project repo AND at a task HEAD) from a
+  // genuine divergent duplicate (same id, different content across repos),
+  // which is the one case where this first-seen dedupe silently drops data.
+  const keptNorm = new Map<string, string>();
+  const warnings: CollectionWarning[] = [];
+  for (let i = 0; i < plan.length; i++) {
+    const text = texts[i];
+    if (text === null) continue;
+    let rec: FoldRecord;
     try {
-      const repo = await env.ARTIFACTS.get(name);
-      await addBlob(await repo.readFile({ ref: "main", path: "record.json" }), name);
+      rec = JSON.parse(text) as FoldRecord;
     } catch {
-      /* skip */
+      /* not JSON a JS reader accepts — skip (see ENGINEERING.md collection audit) */
+      continue;
+    }
+    if (!rec || typeof rec.id !== "string") continue;
+    const norm = JSON.stringify(rec);
+    if (!byId.has(rec.id)) {
+      byId.set(rec.id, rec);
+      origin.set(rec.id, plan[i].repo);
+      keptNorm.set(rec.id, norm);
+    } else if (keptNorm.get(rec.id) !== norm) {
+      // Divergent duplicate: a record with this id, but different content, was
+      // dropped by first-seen dedupe. Surfaced rather than lost silently.
+      warnings.push({
+        id: rec.id,
+        keptFrom: origin.get(rec.id) ?? null,
+        droppedFrom: plan[i].repo,
+      });
     }
   }
 
-  return { records: [...byId.values()], repos: names, origin };
+  return { records: [...byId.values()], repos: names, origin, warnings };
 }
 
 async function projectDerivation(
@@ -250,9 +330,17 @@ async function projectDerivation(
   recordCount: number;
   repos: string[];
   origin: Map<string, string>;
+  warnings: CollectionWarning[];
 }> {
-  const { records, repos, origin } = await collectProject(env, project);
-  return { out: derive(records), records, recordCount: records.length, repos, origin };
+  const { records, repos, origin, warnings } = await collectProject(env, project);
+  return {
+    out: derive(records),
+    records,
+    recordCount: records.length,
+    repos,
+    origin,
+    warnings,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +572,18 @@ async function handleRoot(request: Request, env: Env): Promise<Response> {
 async function handleRecords(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const project = url.searchParams.get("project") ?? DEFAULT_PROJECT;
-  const { out, records, repos, origin } = await projectDerivation(env, project);
+  const { out, records, repos, origin, warnings } = await projectDerivation(
+    env,
+    project,
+  );
   const view = buildRecordsView(records, out, origin, witnessFreshness(records));
-  return json({ project, count: view.length, repos, records: view });
+  return json({
+    project,
+    count: view.length,
+    repos,
+    records: view,
+    collectionWarnings: warnings,
+  });
 }
 
 async function handleListRepos(env: Env): Promise<Response> {

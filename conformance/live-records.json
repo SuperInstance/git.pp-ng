@@ -1,0 +1,735 @@
+{
+ "poc-quilt-1": [
+  {
+   "effects": {
+    "project": "poc-quilt-1",
+    "status": "open"
+   },
+   "id": "genesis",
+   "kind": "task",
+   "parents": []
+  },
+  {
+   "effects": {
+    "config.timeout": 30,
+    "feature.cache": "on"
+   },
+   "id": "task-a",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "config.timeout": 60,
+    "feature.search": "on"
+   },
+   "id": "task-b",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "config.timeout": 45
+   },
+   "id": "override-1",
+   "kind": "override",
+   "parents": [
+    "task-a",
+    "task-b"
+   ],
+   "reason": "captain: 45 is the safe value"
+  },
+  {
+   "effects": {
+    "feature.inherited": true
+   },
+   "id": "task-c",
+   "kind": "task",
+   "parents": [
+    "override-1"
+   ]
+  },
+  {
+   "effects": {
+    "config.timeout": 99
+   },
+   "id": "task-d",
+   "kind": "task",
+   "parents": [
+    "task-b"
+   ]
+  },
+  {
+   "effects": {
+    "env.oracle_disk_pct": 93
+   },
+   "id": "witness-1",
+   "kind": "witness",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "env.oracle_load1_x100": 17
+   },
+   "id": "witness-2",
+   "kind": "witness",
+   "parents": [
+    "override-1"
+   ]
+  }
+ ],
+ "poc-scale-1": [
+  {
+   "effects": {
+    "project": "poc-scale-1",
+    "status": "open"
+   },
+   "id": "genesis",
+   "kind": "task",
+   "parents": []
+  },
+  {
+   "effects": {
+    "feature.f01": true
+   },
+   "id": "t01",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 4,
+    "feature.f02": true
+   },
+   "id": "t02",
+   "kind": "task",
+   "parents": [
+    "t01"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "us-east",
+    "feature.f03": true
+   },
+   "id": "t03",
+   "kind": "task",
+   "parents": [
+    "t02"
+   ]
+  },
+  {
+   "effects": {
+    "config.mode": "fast",
+    "feature.f04": true
+   },
+   "id": "t04",
+   "kind": "task",
+   "parents": [
+    "t03"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f05": true
+   },
+   "id": "t05",
+   "kind": "task",
+   "parents": [
+    "t04"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f06": true
+   },
+   "id": "t06",
+   "kind": "task",
+   "parents": [
+    "t05"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f07": true
+   },
+   "id": "t07",
+   "kind": "task",
+   "parents": [
+    "t06"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 6,
+    "feature.f08": true
+   },
+   "id": "t08",
+   "kind": "task",
+   "parents": [
+    "t07"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "us-east-2",
+    "feature.f09": true
+   },
+   "id": "t09",
+   "kind": "task",
+   "parents": [
+    "t08"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f10": true
+   },
+   "id": "t10",
+   "kind": "task",
+   "parents": [
+    "t09"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f11": true
+   },
+   "id": "t11",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f12": true
+   },
+   "id": "t12",
+   "kind": "task",
+   "parents": [
+    "t11"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 8,
+    "feature.f13": true
+   },
+   "id": "t13",
+   "kind": "task",
+   "parents": [
+    "t12"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "us-west",
+    "feature.f14": true
+   },
+   "id": "t14",
+   "kind": "task",
+   "parents": [
+    "t13"
+   ]
+  },
+  {
+   "effects": {
+    "config.mode": "safe",
+    "feature.f15": true
+   },
+   "id": "t15",
+   "kind": "task",
+   "parents": [
+    "t14"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f16": true
+   },
+   "id": "t16",
+   "kind": "task",
+   "parents": [
+    "t15"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f17": true
+   },
+   "id": "t17",
+   "kind": "task",
+   "parents": [
+    "t16"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f18": true
+   },
+   "id": "t18",
+   "kind": "task",
+   "parents": [
+    "t17"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 12,
+    "feature.f19": true
+   },
+   "id": "t19",
+   "kind": "task",
+   "parents": [
+    "t18"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f20": true
+   },
+   "id": "t20",
+   "kind": "task",
+   "parents": [
+    "t19"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f21": true
+   },
+   "id": "t21",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f22": true
+   },
+   "id": "t22",
+   "kind": "task",
+   "parents": [
+    "t21"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f23": true
+   },
+   "id": "t23",
+   "kind": "task",
+   "parents": [
+    "t22"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 16,
+    "feature.f24": true
+   },
+   "id": "t24",
+   "kind": "task",
+   "parents": [
+    "t23"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "eu-west",
+    "feature.f25": true
+   },
+   "id": "t25",
+   "kind": "task",
+   "parents": [
+    "t24"
+   ]
+  },
+  {
+   "effects": {
+    "config.mode": "fast",
+    "feature.f26": true
+   },
+   "id": "t26",
+   "kind": "task",
+   "parents": [
+    "t25"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "eu-north",
+    "feature.f27": true
+   },
+   "id": "t27",
+   "kind": "task",
+   "parents": [
+    "t26"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f28": true
+   },
+   "id": "t28",
+   "kind": "task",
+   "parents": [
+    "t27"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f29": true
+   },
+   "id": "t29",
+   "kind": "task",
+   "parents": [
+    "t28"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 24,
+    "feature.f30": true
+   },
+   "id": "t30",
+   "kind": "task",
+   "parents": [
+    "t29"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f31": true
+   },
+   "id": "t31",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f32": true
+   },
+   "id": "t32",
+   "kind": "task",
+   "parents": [
+    "t31"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f33": true
+   },
+   "id": "t33",
+   "kind": "task",
+   "parents": [
+    "t32"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f34": true
+   },
+   "id": "t34",
+   "kind": "task",
+   "parents": [
+    "t33"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 32,
+    "feature.f35": true
+   },
+   "id": "t35",
+   "kind": "task",
+   "parents": [
+    "t34"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "eu-central",
+    "feature.f36": true
+   },
+   "id": "t36",
+   "kind": "task",
+   "parents": [
+    "t35"
+   ]
+  },
+  {
+   "effects": {
+    "config.mode": "turbo",
+    "feature.f37": true
+   },
+   "id": "t37",
+   "kind": "task",
+   "parents": [
+    "t36"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f38": true
+   },
+   "id": "t38",
+   "kind": "task",
+   "parents": [
+    "t37"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f39": true
+   },
+   "id": "t39",
+   "kind": "task",
+   "parents": [
+    "t38"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f40": true
+   },
+   "id": "t40",
+   "kind": "task",
+   "parents": [
+    "t39",
+    "t10"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f41": true
+   },
+   "id": "t41",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f42": true
+   },
+   "id": "t42",
+   "kind": "task",
+   "parents": [
+    "t41"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f43": true
+   },
+   "id": "t43",
+   "kind": "task",
+   "parents": [
+    "t42"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 3,
+    "feature.f44": true
+   },
+   "id": "t44",
+   "kind": "task",
+   "parents": [
+    "t43"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f45": true
+   },
+   "id": "t45",
+   "kind": "task",
+   "parents": [
+    "t44"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 64,
+    "feature.f46": true
+   },
+   "id": "t46",
+   "kind": "task",
+   "parents": [
+    "t45"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "ap-south",
+    "feature.f47": true
+   },
+   "id": "t47",
+   "kind": "task",
+   "parents": [
+    "t46"
+   ]
+  },
+  {
+   "effects": {
+    "config.mode": "safe",
+    "feature.f48": true
+   },
+   "id": "t48",
+   "kind": "task",
+   "parents": [
+    "t47"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f49": true
+   },
+   "id": "t49",
+   "kind": "task",
+   "parents": [
+    "t48"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f50": true
+   },
+   "id": "t50",
+   "kind": "task",
+   "parents": [
+    "t49",
+    "t20"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f51": true
+   },
+   "id": "t51",
+   "kind": "task",
+   "parents": [
+    "genesis"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f52": true
+   },
+   "id": "t52",
+   "kind": "task",
+   "parents": [
+    "t51"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f53": true
+   },
+   "id": "t53",
+   "kind": "task",
+   "parents": [
+    "t52"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f54": true
+   },
+   "id": "t54",
+   "kind": "task",
+   "parents": [
+    "t53"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f55": true
+   },
+   "id": "t55",
+   "kind": "task",
+   "parents": [
+    "t54"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f56": true
+   },
+   "id": "t56",
+   "kind": "task",
+   "parents": [
+    "t55"
+   ]
+  },
+  {
+   "effects": {
+    "config.workers": 128,
+    "feature.f57": true
+   },
+   "id": "t57",
+   "kind": "task",
+   "parents": [
+    "t56"
+   ]
+  },
+  {
+   "effects": {
+    "config.region": "ap-northeast",
+    "feature.f58": true
+   },
+   "id": "t58",
+   "kind": "task",
+   "parents": [
+    "t57"
+   ]
+  },
+  {
+   "effects": {
+    "config.mode": "eco",
+    "feature.f59": true
+   },
+   "id": "t59",
+   "kind": "task",
+   "parents": [
+    "t58"
+   ]
+  },
+  {
+   "effects": {
+    "feature.f60": true
+   },
+   "id": "t60",
+   "kind": "task",
+   "parents": [
+    "t59",
+    "t30"
+   ]
+  },
+  {
+   "effects": {
+    "env.oracle_load1_x100": 24
+   },
+   "id": "witness-1",
+   "kind": "witness",
+   "parents": [
+    "genesis"
+   ]
+  }
+ ]
+}
