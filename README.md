@@ -4,7 +4,7 @@
 
 **▶ Watch the demo (7 min)** — the full walkthrough on the live system: the race, the override inheritance, the 50-shuffle determinism proof:
 
-https://github.com/user-attachments/assets/6123e42c-b656-435d-bf01-a2f86998d6f3
+https://github.com/user-attachments/assets/4a31f8ff-a491-43d1-bfb8-18241d52d072
 
 (The file also lives in this repo at `demo/gitpp-demo.mp4`.) — the derived state of a real project, recomputed from its record on every request. Raw form: https://gitpp.casey-digennaro.workers.dev/api/state?project=poc-quilt-1
 
