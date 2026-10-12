@@ -492,3 +492,47 @@ export function verifyCheckpoint(
   const subset = [...closure].sort().map((rid) => idx[rid]);
   return pyDeepEqual(derive(subset).state, want);
 }
+
+/**
+ * Per-witness staleness, as a record-count distance (TypeScript port of the
+ * referee's witness_freshness; checked against it by the conformance harness).
+ *
+ * recordsBehind(w) = (number of applied records) - (number of applied
+ * records in w's own causal past, w included). It counts the applied records
+ * that landed without w in their ancestry: the records w did not witness. A
+ * witness with recordsBehind 0 saw everything applied; a larger number is a
+ * staler observation.
+ *
+ * Pure function of the record, like derive(). Returns a map from witness id
+ * to recordsBehind for every APPLIED record of kind "witness" (orphaned and
+ * cycle-excluded witnesses are absent, exactly as they are absent from
+ * derive()'s state). derive()'s own output is untouched, so /api/state is
+ * unaffected.
+ */
+export function witnessFreshness(records: FoldRecord[]): { [id: string]: number } {
+  const idx = indexRecords([...records]);
+  const out = derive(records);
+  const applied = new Set<string>(out.order);
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+
+  const ancestorsIncl = (start: string): Set<string> => {
+    const seen = new Set<string>([start]);
+    const stack: string[] = [...(parents[start] ?? [])];
+    while (stack.length > 0) {
+      const n = stack.pop() as string;
+      if (seen.has(n) || !applied.has(n)) continue;
+      seen.add(n);
+      for (const p of parents[n] ?? []) stack.push(p);
+    }
+    return seen;
+  };
+
+  const total = applied.size;
+  const result: { [id: string]: number } = {};
+  for (const rid of out.order) {
+    const kind = (idx[rid] as { kind?: unknown }).kind;
+    if (kind === "witness") result[rid] = total - ancestorsIncl(rid).size;
+  }
+  return result;
+}

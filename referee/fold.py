@@ -228,3 +228,41 @@ def verify_checkpoint(records, checkpoint):
             stack.append(p)
 
     return derive([idx[r] for r in sorted(closure)])["state"] == want
+
+
+def witness_freshness(records):
+    """Per-witness staleness, as a record-count distance.
+
+    recordsBehind(w) = (number of applied records) - (number of applied
+    records in w's own causal past, w included). It counts the applied
+    records that landed without w in their ancestry: the records w did not
+    witness. A witness with recordsBehind 0 saw everything that is applied;
+    a larger number is a staler observation.
+
+    Pure function of the record, like derive(). Returns {witness_id: int}
+    for every APPLIED record of kind "witness" (orphaned and cycle-excluded
+    witnesses are absent, exactly as they are absent from derive()'s state).
+    derive()'s own output is unchanged, so /api/state is unaffected.
+    """
+    records = list(records)
+    idx = _index(records)
+    out = derive(records)
+    applied = set(out["order"])
+    parents = {rid: _parents(rec) for rid, rec in idx.items()}
+
+    def _ancestors_incl(start):
+        seen, stack = {start}, list(parents.get(start, ()))
+        while stack:
+            n = stack.pop()
+            if n in seen or n not in applied:
+                continue
+            seen.add(n)
+            stack.extend(parents.get(n, ()))
+        return seen
+
+    total = len(applied)
+    result = {}
+    for rid in out["order"]:
+        if idx[rid].get("kind") == "witness":
+            result[rid] = total - len(_ancestors_incl(rid))
+    return result
