@@ -166,7 +166,11 @@ function commitIds(logResult: unknown): string[] {
 async function collectProject(
   env: Env,
   project: string,
-): Promise<{ records: FoldRecord[]; repos: string[] }> {
+): Promise<{
+  records: FoldRecord[];
+  repos: string[];
+  origin: Map<string, string>;
+}> {
   const all = await listAllRepos(env);
   const names = all
     .map((r) => r.name)
@@ -177,12 +181,20 @@ async function collectProject(
     .sort();
 
   const byId = new Map<string, FoldRecord>();
-  const addBlob = async (blob: Blob | null): Promise<void> => {
+  // record id -> the repo the record was first collected from. First-seen
+  // wins, exactly as the dedupe below does, so the project repo (walked
+  // first) is credited for records that also appear at a task HEAD.
+  const origin = new Map<string, string>();
+  const addBlob = async (
+    blob: Blob | null,
+    repoName: string,
+  ): Promise<void> => {
     if (!blob) return;
     try {
       const rec = JSON.parse(await blob.text()) as FoldRecord;
       if (rec && typeof rec.id === "string" && !byId.has(rec.id)) {
         byId.set(rec.id, rec);
+        origin.set(rec.id, repoName);
       }
     } catch {
       /* not a record — skip silently */
@@ -201,7 +213,7 @@ async function collectProject(
     if (commits.length === 0) commits = ["main"];
     for (const c of commits) {
       try {
-        await addBlob(await repo.readFile({ ref: c, path: "record.json" }));
+        await addBlob(await repo.readFile({ ref: c, path: "record.json" }), project);
       } catch {
         /* missing record.json at this ref — skip */
       }
@@ -215,33 +227,125 @@ async function collectProject(
     if (name === project) continue;
     try {
       const repo = await env.ARTIFACTS.get(name);
-      await addBlob(await repo.readFile({ ref: "main", path: "record.json" }));
+      await addBlob(await repo.readFile({ ref: "main", path: "record.json" }), name);
     } catch {
       /* skip */
     }
   }
 
-  return { records: [...byId.values()], repos: names };
+  return { records: [...byId.values()], repos: names, origin };
 }
 
 async function projectDerivation(
   env: Env,
   project: string,
-): Promise<{ out: DeriveOutput; recordCount: number; repos: string[] }> {
-  const { records, repos } = await collectProject(env, project);
-  return { out: derive(records), recordCount: records.length, repos };
+): Promise<{
+  out: DeriveOutput;
+  records: FoldRecord[];
+  recordCount: number;
+  repos: string[];
+  origin: Map<string, string>;
+}> {
+  const { records, repos, origin } = await collectProject(env, project);
+  return { out: derive(records), records, recordCount: records.length, repos, origin };
+}
+
+// ---------------------------------------------------------------------------
+// record view: the collected records, annotated with the repo each came
+// from and ordered by the fold's application order (out.order), with
+// orphans — which have no application order — listed after. Fields are the
+// raw record fields (parents/kind/effects/reason); derivation is never
+// consulted for anything but ordering and the orphan flag.
+// ---------------------------------------------------------------------------
+
+interface RecordView {
+  id: string;
+  repo: string | null;
+  kind: unknown;
+  parents: unknown;
+  effects: unknown;
+  reason: unknown;
+  orphan: boolean;
+}
+
+function buildRecordsView(
+  records: FoldRecord[],
+  out: DeriveOutput,
+  origin: Map<string, string>,
+): RecordView[] {
+  const byId = new Map<string, FoldRecord>();
+  for (const r of records) {
+    if (r && typeof r.id === "string" && !byId.has(r.id)) byId.set(r.id, r);
+  }
+  const orphanSet = new Set<string>(out.orphans);
+
+  // Application order first, then orphans, then anything neither covers
+  // (defensive — derive partitions every id into order ∪ orphans).
+  const seen = new Set<string>();
+  const seq: string[] = [];
+  const pushId = (id: string): void => {
+    if (!seen.has(id) && byId.has(id)) {
+      seen.add(id);
+      seq.push(id);
+    }
+  };
+  for (const id of out.order) pushId(id);
+  for (const id of out.orphans) pushId(id);
+  for (const id of byId.keys()) pushId(id);
+
+  return seq.map((id) => {
+    const rec = byId.get(id) as FoldRecord;
+    return {
+      id,
+      repo: origin.get(id) ?? null,
+      kind: rec.kind,
+      parents: rec.parents ?? [],
+      effects: rec.effects ?? {},
+      reason: rec.reason,
+      orphan: orphanSet.has(id),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
 // projection page
 // ---------------------------------------------------------------------------
 
+/** Compact one-line summary of a record's effects, e.g. "config.timeout=45,
+ * feature.cache=on". Empty effects render as an em dash. */
+function effectsSummary(effects: unknown): string {
+  if (!effects || typeof effects !== "object" || Array.isArray(effects)) {
+    return "—";
+  }
+  const parts = Object.keys(effects as { [k: string]: unknown })
+    .sort()
+    .map((k) => `${k}=${display((effects as { [k: string]: unknown })[k])}`);
+  return parts.length ? parts.join(", ") : "—";
+}
+
 function renderProjection(
   project: string,
   out: DeriveOutput,
   recordCount: number,
   repos: string[],
+  recordsView: RecordView[],
 ): string {
+  const recordRows = recordsView
+    .map((r) => {
+      const parents =
+        Array.isArray(r.parents) && r.parents.length
+          ? r.parents.map((p) => esc(String(p))).join(", ")
+          : "—";
+      const kind = r.kind === undefined || r.kind === null ? "—" : String(r.kind);
+      const kindCell = r.orphan ? `${esc(kind)} <em>(orphan)</em>` : esc(kind);
+      const from = r.repo ? `<span class="meta">${esc(r.repo)}</span>` : "";
+      return (
+        `<tr><td><code>${esc(r.id)}</code>${from ? "<br>" + from : ""}</td>` +
+        `<td>${kindCell}</td><td>${parents}</td>` +
+        `<td>${esc(effectsSummary(r.effects))}</td></tr>`
+      );
+    })
+    .join("\n");
   const stateRows = Object.keys(out.state)
     .sort()
     .map(
@@ -292,6 +396,17 @@ function renderProjection(
   this page is a projection: a pure function of the record, recomputed per request.</p>
 </header>
 
+<h2>The record</h2>
+<p class="meta">The atom is the record, not the state. Each entry below is a
+task completion, witness observation, or reasoned override, annotated with the
+repo it was collected from and listed in the fold's application order. The state
+section that follows is a pure fold of exactly these entries — read the record
+first, then the state it folds to.</p>
+<table>
+  <tr><th>id (repo)</th><th>kind</th><th>parents</th><th>effects</th></tr>
+${recordRows}
+</table>
+
 <h2>Derived state</h2>
 <table>
   <tr><th>key</th><th>value</th></tr>
@@ -333,10 +448,25 @@ async function handleState(request: Request, env: Env): Promise<Response> {
 async function handleRoot(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const project = url.searchParams.get("project") ?? DEFAULT_PROJECT;
-  const { out, recordCount, repos } = await projectDerivation(env, project);
-  return new Response(renderProjection(project, out, recordCount, repos), {
-    headers: { "content-type": "text/html; charset=utf-8" },
-  });
+  const { out, records, recordCount, repos, origin } = await projectDerivation(
+    env,
+    project,
+  );
+  const recordsView = buildRecordsView(records, out, origin);
+  return new Response(
+    renderProjection(project, out, recordCount, repos, recordsView),
+    {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    },
+  );
+}
+
+async function handleRecords(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const project = url.searchParams.get("project") ?? DEFAULT_PROJECT;
+  const { out, records, repos, origin } = await projectDerivation(env, project);
+  const view = buildRecordsView(records, out, origin);
+  return json({ project, count: view.length, repos, records: view });
 }
 
 async function handleListRepos(env: Env): Promise<Response> {
@@ -500,6 +630,9 @@ export default {
       if (method === "GET" && path === "/") return handleRoot(request, env);
       if (method === "GET" && path === "/api/state") {
         return handleState(request, env);
+      }
+      if (method === "GET" && path === "/api/records") {
+        return handleRecords(request, env);
       }
       if (method === "GET" && path === "/api/repos") {
         return handleListRepos(env);
