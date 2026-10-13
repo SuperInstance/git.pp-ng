@@ -81,15 +81,47 @@ function pyEscapeString(s: string): string {
   return out + '"';
 }
 
+// Reproduce Python's float repr (CPython 'r' format == json.dumps of a float)
+// for a non-integral finite value, or an integral value outside the plain-int
+// band: shortest round-trip digits, scientific when the decimal point position
+// `decpt` satisfies `decpt <= -4 || decpt > 16`, exponent sign-prefixed and
+// zero-padded to >=2 digits. The shortest digits come from `toExponential()`,
+// which (with no argument) yields the minimal unique representation — the same
+// digit sequence Python's shortest-repr produces, so the two ports agree.
+function pyFloatRepr(n: number): string {
+  const neg = n < 0;
+  const abs = Math.abs(n);
+  const exp = abs.toExponential();
+  const eIdx = exp.indexOf("e");
+  const mant = exp.slice(0, eIdx);
+  const E = parseInt(exp.slice(eIdx + 1), 10);
+  const decpt = E + 1;
+  let s: string;
+  if (decpt <= -4 || decpt > 16) {
+    const eSign = E < 0 ? "-" : "+";
+    s = mant + "e" + eSign + String(Math.abs(E)).padStart(2, "0");
+  } else {
+    // Fixed notation in this band never uses an exponent in either port, so
+    // JS's shortest fixed form already matches Python's.
+    s = String(abs);
+  }
+  return neg ? "-" + s : s;
+}
+
 function pyNumber(n: number): string {
-  // JS numbers do not distinguish int from float after JSON.parse; the
-  // referee's fixtures (and real record.json effects) use ints, so integral
-  // values take the int spelling. Non-integral values use the shortest
-  // round-trip form, which agrees with Python repr for ordinary decimals.
+  // JS numbers do not distinguish int from float after JSON.parse, so this
+  // reproduces Python's json.dumps number rendering (after the referee's
+  // _leaf_num, which spells an integral value within |v| < 1e21 as a plain
+  // integer). An integral value in that band takes the EXACT integer spelling
+  // via BigInt — `String(n)` would give the shortest round-trip, which diverges
+  // from Python's int() for integral doubles in [1e16, 1e21) (e.g.
+  // 724818294626474393600, not ...400000). Zero (incl. -0) is "0"; everything
+  // else (non-integral, or |v| >= 1e21) goes through Python float repr.
   if (Number.isNaN(n)) return "NaN";
   if (!Number.isFinite(n)) return n > 0 ? "Infinity" : "-Infinity";
-  if (Object.is(n, -0)) return "-0.0";
-  return String(n);
+  if (n === 0) return "0";
+  if (Number.isInteger(n) && Math.abs(n) < 1e21) return BigInt(n).toString();
+  return pyFloatRepr(n);
 }
 
 export function pyCanonical(value: unknown): string {
@@ -539,19 +571,21 @@ function sha256Hex(input: string): string {
   return hex;
 }
 
-/** SHA-256 of a record's fold-relevant content: id, parents (as a set, sorted
- * by code point), kind (or null), effects. Fields the fold ignores (e.g. a
- * task's reason) are excluded — the leaf pins what derivation depends on.
+/** SHA-256 of a record's WHOLE canonical content: id, parents (as a set,
+ * sorted by code point), kind (raw), effects (float64 domain), and reason
+ * (raw, null if absent). Hashing the whole record — reason included — means
+ * any content tamper changes the leaf, so it is caught: a tamper that alters
+ * derived state is MISMATCH, and a reason re-version (which the fold ignores,
+ * so derived state is unchanged) is STATE-ONLY rather than a silent VERIFIED.
  * Mirrors the referee's _record_leaf. */
 function recordLeaf(rec: FoldRecord): string {
+  const r = rec as { id?: unknown; kind?: unknown; reason?: unknown };
   const normalized = {
-    id: String((rec as { id?: unknown }).id ?? ""),
+    id: String(r.id ?? ""),
     parents: parentsOf(rec).slice().sort(cmpCodePoints),
-    kind:
-      typeof (rec as { kind?: unknown }).kind === "string"
-        ? (rec as { kind: string }).kind
-        : null,
+    kind: r.kind ?? null,
     effects: effectsOf(rec),
+    reason: r.reason ?? null,
   };
   return sha256Hex(pyCanonical(normalized));
 }
@@ -583,6 +617,9 @@ function closureIds(
  *
  *   closureRoot = SHA-256( "\n".join( id + ":" + recordLeaf(rec)
  *                          for id in sorted(closureIds, code-point) ) )
+ *
+ * where recordLeaf covers the whole canonical record (id, parents sorted, kind,
+ * effects, reason) in the float64 domain.
  */
 export function checkpointRoot(
   records: FoldRecord[],

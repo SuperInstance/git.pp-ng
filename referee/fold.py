@@ -91,13 +91,16 @@ def _effects(rec):
 # --------------------------------------------------------------------------
 
 def _leaf_num(v):
-    """Encode a number for the leaf in the float64 domain, matching JS
-    Number->string: an integral value with |v| < 1e21 is written as a plain
-    decimal integer (no trailing ``.0``), so Python's float64-canonicalised
-    non-safe integer (``9007199254740992.0``) and the TS double
-    (``9007199254740992``) produce the same bytes. Other finite values use the
-    shortest round-trip decimal (``1.5``), which both ports already agree on.
-    Recurses through containers; bool is left as a distinct JSON type."""
+    """Encode a number for the leaf in the float64 domain, one canonical form
+    both ports compute identically. An integral value with |v| < 1e21 is written
+    as its EXACT decimal integer (``int(v)``, no trailing ``.0``); the TS port
+    pairs this with ``BigInt(v)`` (not ``String(v)``, whose shortest round-trip
+    diverges from the exact integer for integral doubles in ``[1e16, 1e21)``).
+    Other finite values keep Python's ``repr``/``json.dumps`` float form
+    (shortest round-trip, scientific with a zero-padded exponent when
+    ``decpt <= -4`` or ``> 16``), which ``src/fold.ts`` reproduces from
+    ``Number.toExponential()``. Recurses through containers; bool is left as a
+    distinct JSON type."""
     if isinstance(v, bool):
         return v
     if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
@@ -110,15 +113,19 @@ def _leaf_num(v):
 
 
 def _record_leaf(rec):
-    """SHA-256 hex of a record's fold-relevant content: id, parents (as a set,
-    sorted by code point), kind (or null), effects (float64-canonicalised and
-    leaf-number-encoded). Fields the fold ignores (e.g. a task's reason) are
-    deliberately excluded — the leaf pins what derivation depends on."""
+    """SHA-256 hex of a record's WHOLE canonical content: id, parents (as a set,
+    sorted by code point), kind (raw), effects (float64-canonicalised and
+    leaf-number-encoded), and reason (raw, null if absent). Hashing the whole
+    record — reason included — means any content tamper changes the leaf, so it
+    is caught: a tamper that alters derived state is MISMATCH, and a reason
+    re-version (which the fold ignores, so derived state is unchanged) is
+    STATE-ONLY rather than a silent VERIFIED."""
     normalized = {
         "id": str(rec.get("id", "")),
         "parents": sorted(_parents(rec)),
-        "kind": rec.get("kind") if isinstance(rec.get("kind"), str) else None,
+        "kind": rec.get("kind"),
         "effects": {k: _leaf_num(_canon_num(v)) for k, v in _effects(rec).items()},
+        "reason": rec.get("reason"),
     }
     canon = json.dumps(normalized, sort_keys=True, ensure_ascii=True,
                        separators=(", ", ": "))
@@ -148,8 +155,8 @@ def checkpoint_root(records, at):
         closureRoot = SHA-256( "\\n".join( id + ":" + leaf(rec)
                                for id in sorted(closureIds, code-point) ) )
 
-    where leaf(rec) = SHA-256( json.dumps({id, parents sorted, kind, effects},
-    sort_keys=True, ensure_ascii=True) ), both as lowercase hex."""
+    where leaf(rec) = SHA-256( json.dumps({id, parents sorted, kind, effects,
+    reason}, sort_keys=True, ensure_ascii=True) ), both as lowercase hex."""
     idx = _index(records)
     at = str(at)
     if at not in idx:
