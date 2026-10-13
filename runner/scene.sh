@@ -78,7 +78,7 @@ say "=== git.pp scene replay — project $PROJECT (worker $WORKER) ==="
 step "create project repo $PROJECT" "${PP[@]}" project create "$PROJECT" \
   --description "judge replay scene (runner/scene.sh) — safe to delete"
 step "genesis record lands in the project repo" "${PP[@]}" complete "$PROJECT" \
-  --id genesis --parents "" --kind task \
+  --id genesis --parents "" --kind task --genesis \
   --set "project=$PROJECT" --set status=open
 
 # -- 2. two agents, conflicting completions -------------------------------
