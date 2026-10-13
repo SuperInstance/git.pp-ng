@@ -337,6 +337,52 @@ _LIVE = json.loads((HERE / "live-records.json").read_text())
 for _proj, _recs in _LIVE.items():
     add(f"live-{_proj}", _recs, ats=[])
 
+# --- SPIKE: checkpoint v2 — closure-root pinning --------------------------
+# Each case pins a v2 probe (state + closureRoot) and the harness compares the
+# three-way verify result Python-vs-TS, plus every applied id's digest (see
+# main()'s `roots` comparison). The expected roots/states are computed here by
+# the referee so a divergence in either port shows up as a verify mismatch.
+
+def _v2_case(name, records, at, state, closure_root):
+    CASES.append({"name": name, "records": [dict(r) for r in records],
+                  "probes": [{"at": at, "state": state, "closureRoot": closure_root}]})
+
+# (a) VERIFIED — root pinned over the very set being verified.
+_Sa = [R("g", [], "task", {"k": 1}),
+       R("a", ["g"], "task", {"k": 1}),
+       R("c", ["a"], "witness", {})]
+_root_a = ref.checkpoint_root([dict(r) for r in _Sa], "c")
+_state_a = closure_state(_Sa, "c")
+_v2_case("ckpt-v2-verified", _Sa, "c", _state_a, _root_a)
+
+# (b) STATE-ONLY — a later-arriving ancestor grows at's closure; the derived
+# state is unchanged, but the pinned root (taken over the smaller S0) no longer
+# matches. Never a silent VERIFIED. S0: closure(R) = {g, R}. S1: R re-versioned
+# to also parent m, so closure(R) = {g, m, R}; m (task, k=1) keeps state {k:1}.
+_S0 = [R("g", [], "task", {"k": 1}), R("R", ["g"], "witness", {})]
+_S1 = [R("g", [], "task", {"k": 1}),
+       R("m", ["g"], "task", {"k": 1}),
+       R("R", ["g", "m"], "witness", {})]
+_root_b0 = ref.checkpoint_root([dict(r) for r in _S0], "R")   # pinned over S0
+_state_b = closure_state(_S1, "R")                            # {k:1} in S1 too
+_v2_case("ckpt-v2-state-only-grown", _S1, "R", _state_b, _root_b0)
+
+# (c) MISMATCH — the declared state is wrong (root present).
+_v2_case("ckpt-v2-mismatch-state", _Sa, "c", {"k": 999}, _root_a)
+
+# (d) tampered root — state matches but the pinned root is forged; must be
+# STATE-ONLY (not VERIFIED), never silently accepted.
+_v2_case("ckpt-v2-tampered-root", _Sa, "c", _state_a,
+         "0000000000000000000000000000000000000000000000000000000000000000")
+
+# (e) the frozen live project: VERIFIED at task-c over the exact live set, and
+# a regression pin on the digest value stated in the PR.
+_POC = _LIVE["poc-quilt-1"]
+_root_poc = ref.checkpoint_root([dict(r) for r in _POC], "task-c")
+_v2_case("ckpt-v2-live-poc-quilt-1", _POC, "task-c",
+         closure_state(_POC, "task-c"), _root_poc)
+POC_QUILT1_TASK_C_ROOT = "891aa3308ae3e1dd4e32c1f8f20ec9093ef8d69bf9e67a1be6179d73fdbdb884"
+
 
 def _ancestors(start, parents, restrict=None):
     """Full ancestor set of `start` (optionally restricted to `restrict`)."""
@@ -491,9 +537,13 @@ def main():
     for case in CASES:
         name = case["name"]
         exp_derive = derive([dict(r) for r in case["records"]])
-        exp_verify = [verify([dict(r) for r in case["records"]],
-                             {"at": p["at"], "state": p["state"]})
-                      for p in case["probes"]]
+        # Pass closureRoot through so v2 probes get the three-way result; probes
+        # without it get the v1 bool, unchanged.
+        exp_verify = [
+            verify([dict(r) for r in case["records"]],
+                   {k: p[k] for k in ("at", "state", "closureRoot") if k in p})
+            for p in case["probes"]
+        ]
         got = ts_results.get(name)
         if got is None:
             divergences.append((name, "missing from TS results"))
@@ -511,10 +561,17 @@ def main():
         if got.get("freshness") != exp_fresh:
             divergences.append(
                 (name, f"freshness differs: py={exp_fresh} ts={got.get('freshness')}"))
+        # checkpoint v2: every applied id's closure-root digest must be identical
+        # across ports (SPIKE).
+        exp_roots = {rid: ref.checkpoint_root([dict(r) for r in case["records"]], rid)
+                     for rid in exp_derive["order"]}
+        if got.get("roots") != exp_roots:
+            divergences.append((name, "closure-root digests differ"))
 
     total_probes = sum(len(c["probes"]) for c in CASES)
     total_witnesses = sum(
         len(ref.witness_freshness([dict(r) for r in c["records"]])) for c in CASES)
+    total_roots = sum(len(derive([dict(r) for r in c["records"]])["order"]) for c in CASES)
     if divergences:
         print(f"\nDIVERGENCES: {len(divergences)} case(s):")
         for name, why in divergences[:20]:
@@ -529,15 +586,23 @@ def main():
         oracle_checks = differential_oracle()
         pin_checks = transport_pin()
         golden_checks = live_golden()
+        # SPIKE: pin the frozen poc-quilt-1 @task-c closure-root digest value so
+        # a change to the digest construction is caught (and matches the PR).
+        actual_poc = ref.checkpoint_root(
+            [dict(r) for r in _LIVE["poc-quilt-1"]], "task-c")
+        assert actual_poc == POC_QUILT1_TASK_C_ROOT, \
+            f"poc-quilt-1@task-c root changed: {actual_poc}"
     except AssertionError as e:
         print(f"\nPROPERTY FAILURE: {e}")
         return 1
 
     print(f"\nCONFORMANCE: {len(CASES)}/{len(CASES)} cases identical "
           f"(derive + {total_probes} checkpoint probes "
-          f"+ {total_witnesses} witness-freshness checks); "
+          f"+ {total_witnesses} witness-freshness checks "
+          f"+ {total_roots} closure-root digests); "
           f"oracle+invariance {oracle_checks}, transport-pin {pin_checks}, "
-          f"live-golden {golden_checks} — all pass")
+          f"live-golden {golden_checks}, poc-quilt-1@task-c root "
+          f"{POC_QUILT1_TASK_C_ROOT[:12]}… — all pass")
     return 0
 
 
