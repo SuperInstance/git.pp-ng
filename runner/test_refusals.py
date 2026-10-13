@@ -100,6 +100,20 @@ check(pp.witness_warnings(rec(kind="witness", effects={"env.disk_pct": 93})) == 
 check(pp.witness_warnings(rec(kind="task", effects={"config.timeout": 5})) == [],
       "task is never warned by kind discipline")
 
+# --- 3b. PROPOSAL-RECORD (EMPTY-EFFECTS TASK) REFUSAL ---------------------
+check(pp.empty_effects_refusal(rec(kind="task", effects={})) is not None,
+      "empty-effects task refused")
+check(pp.empty_effects_refusal({"id": "r", "parents": ["p"], "kind": "task"}) is not None,
+      "missing-effects task refused")
+check(pp.empty_effects_refusal(rec(kind="task", effects={"config.timeout": 5})) is None,
+      "task with effects passes")
+check(pp.empty_effects_refusal(rec(kind="witness", effects={})) is None,
+      "witness with empty effects NOT refused by this rule (the warning's job)")
+check(pp.empty_effects_refusal(rec(kind="override", effects={"config.timeout": 45})) is None,
+      "override with effects passes")
+check(pp.empty_effects_refusal(rec(kind="override", effects={})) is None,
+      "override is out of scope for this rule (task-only)")
+
 # --- 4. REGRESSION: the live scenes' records never trip a refusal ---------
 # Exactly the records runner/scene.sh and poc-quilt-1 push.
 scene_records = [
@@ -118,6 +132,8 @@ check(all(pp.scan_secret(r) is None for r in scene_records),
       "no scene record trips the secret scan")
 check(all(pp.witness_warnings(r) == [] for r in scene_records),
       "no scene witness trips the kind-discipline warning")
+check(all(pp.empty_effects_refusal(r) is None for r in scene_records),
+      "no scene record trips the empty-effects refusal")
 # poc-scale-1 shapes (region/mode strings, feature bools) stay clean too.
 check(pp.scan_secret(rec(effects={"config.region": "us-east-2", "config.mode": "eco"})) is None,
       "scale-project string values do not trip the secret scan")

@@ -19,6 +19,10 @@ Refusals (checked before anything is pushed — the fold is unchanged):
     refused outright; the sanctioned shape is a vault pointer, e.g.
     --set db.password=vault:staging-db, which passes. There is no override
     flag — the refusal is the feature.
+  * a task record with empty/missing effects is refused: a task asserts
+    completed work, so it must carry effects; a change you merely want is
+    spoken to your human, not filed. No override flag. (Record an observation
+    with --kind witness.)
   * an empty-parents (genesis) record is refused unless --genesis is passed
     AND the project has no records yet; the error names the current frontier.
   * a witness carrying non-observation effect keys is warned (stderr), never
@@ -401,6 +405,23 @@ def genesis_decision(parents, genesis_flag, count, frontier):
     return None
 
 
+def empty_effects_refusal(record):
+    """None if the record may proceed; else a one-line teaching refusal.
+    A task record ASSERTS completed work, so it must carry effects. A task with
+    empty or missing effects is the "proposal record" smell: a change merely
+    WANTED, filed instead of spoken. Only kind == "task" is refused here —
+    witness discipline is the existing warning's job, and override is
+    unaffected."""
+    if record.get("kind") != "task":
+        return None
+    eff = record.get("effects")
+    if isinstance(eff, dict) and eff:
+        return None
+    return ("empty-effects task record — a task asserts completed work and must "
+            "carry effects; a change you merely want is spoken to your human, "
+            "not filed. Record an observation with --kind witness.")
+
+
 def _project_of(repo):
     """The project a repo belongs to: the part before the first '--'."""
     return repo.split("--", 1)[0]
@@ -447,11 +468,17 @@ def cmd_complete(args):
         die(f"refusing to push {args.id}: {hit} in the record body (value not "
             "shown). Store the secret in your secret manager and put a pointer "
             "in the record instead, e.g. --set db.password=vault:staging-db.")
-    # 2. Kind discipline: a witness carrying non-observation keys is warned
+    # 2. Proposal-record refusal: a task asserts completed work, so a task with
+    #    empty/missing effects is the "proposal record" smell — refused. No
+    #    override flag (same doctrine as the secret refusal).
+    msg = empty_effects_refusal(record)
+    if msg:
+        die(f"refusing to push {args.id}: {msg}")
+    # 3. Kind discipline: a witness carrying non-observation keys is warned
     #    loudly on stderr, never refused.
     for line in witness_warnings(record):
         print(f"pp: warning: {line}", file=sys.stderr)
-    # 3. Genesis guard: a root record (empty parents) needs --genesis AND an
+    # 4. Genesis guard: a root record (empty parents) needs --genesis AND an
     #    empty project. Only queries the Worker when parents are empty.
     if not parents:
         project = _project_of(args.repo)
