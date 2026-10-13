@@ -99,6 +99,13 @@ live inside the tool the agent already runs, and the fold is unchanged.
 - **Genesis is guarded.** A root record (empty `--parents`) is refused unless
   you pass `--genesis` *and* the project has no records yet. The error names
   the project's current frontier — the records you probably meant to parent to.
+- **A task must carry effects.** A `task` record *asserts completed work*, so a
+  task with empty or missing effects (`{}`) is the "proposal record" smell — a
+  change you merely **want**, filed instead of spoken. It is refused: a wanted
+  change is spoken to your human, not filed. **There is no override flag** (same
+  doctrine as the secret refusal); the error points at `--kind witness` for
+  recording an observation instead. Only `task` is refused here — witness
+  discipline is the warning's job below, and `override` is unaffected.
 - **Witnesses are taught, not blocked.** A `witness` whose effect keys are not
   observations (the convention is `env.*`, `obs.*`, `metric.*`, …) gets a loud
   stderr warning but still pushes — a witness reporting real measured state is
