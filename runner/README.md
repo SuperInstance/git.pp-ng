@@ -82,6 +82,30 @@ from Oracle because that network route to Artifacts git is healthy.
 Temp clones live under `$TMPDIR` (`PP_TMPDIR` to override) and are
 deleted after each command.
 
+## Refusals
+
+`complete` checks the record **before anything is pushed** — the refusals
+live inside the tool the agent already runs, and the fold is unchanged.
+
+- **Secrets never reach the record.** The record body (the `--reason` and
+  every `--set` value, recursively) is scanned for secret-shaped content:
+  known patterns (`sk-…`, `ghp_…`, `AKIA…`, PEM private-key headers, bearer
+  tokens), credential-named `key=value` pairs (a key containing
+  `password`/`secret`/`token`/`key` with a real value), and high-entropy
+  tokens. A hit refuses the push, names the pattern *class* (never the value),
+  and exits non-zero. **There is no override flag** — the sanctioned shape is a
+  **vault pointer**: `--set db.password=vault:staging-db` names the secret
+  without carrying it, and passes.
+- **Genesis is guarded.** A root record (empty `--parents`) is refused unless
+  you pass `--genesis` *and* the project has no records yet. The error names
+  the project's current frontier — the records you probably meant to parent to.
+- **Witnesses are taught, not blocked.** A `witness` whose effect keys are not
+  observations (the convention is `env.*`, `obs.*`, `metric.*`, …) gets a loud
+  stderr warning but still pushes — a witness reporting real measured state is
+  legal; the warning marks the boundary between *seen* and *done*.
+
+Run the refusal tests (pure, no network): `python3 runner/test_refusals.py`.
+
 ## The scene — `bash scene.sh`
 
 One command, a fresh project `demo-<random suffix>` every run

@@ -10,9 +10,19 @@ A judge — or an agent — uses it to drive the live Worker + Artifacts:
                                              prints git-config export lines
   pp.py complete <repo> --id ID --parents a,b --kind task|witness|override
                          --set k=v [--set k=v ...] [--reason "..."]
-                         [--work DIR]
+                         [--work DIR] [--genesis]
                                              clone, write record.json (+
                                              work files), commit, push
+
+Refusals (checked before anything is pushed — the fold is unchanged):
+  * secret-shaped content in the record body (reason + effect values) is
+    refused outright; the sanctioned shape is a vault pointer, e.g.
+    --set db.password=vault:staging-db, which passes. There is no override
+    flag — the refusal is the feature.
+  * an empty-parents (genesis) record is refused unless --genesis is passed
+    AND the project has no records yet; the error names the current frontier.
+  * a witness carrying non-observation effect keys is warned (stderr), never
+    refused — a witness reporting measured state (env.*) is legal.
   pp.py state <project>                      derived state + conflicts
   pp.py verify <project> --at ID [--tamper]  checkpoint check against the
                                              Python referee (../poc)
@@ -45,7 +55,9 @@ whole purpose is to print a token the operator asked for.
 import argparse
 import importlib.util
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -207,6 +219,212 @@ def parse_value(text):
         return text
 
 
+# --------------------------------------------------------------------------
+# refusals — pre-push checks that live inside the tool the agent already runs.
+# The fold is unchanged; these guard what reaches the record in the first place.
+# Pure functions (scan_secret / witness_warnings / genesis_decision) so a
+# runner test can exercise every branch without touching the network.
+# --------------------------------------------------------------------------
+
+# Known secret shapes. Each maps to a human-named pattern class; the matched
+# VALUE is never echoed — only the class is reported.
+_SECRET_PATTERNS = [
+    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "openai-style secret key (sk-...)"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"), "github token (ghp_...)"),
+    (re.compile(r"\bgh[oprsu]_[A-Za-z0-9]{20,}\b"), "github token (gh*_...)"),
+    (re.compile(r"\bAKIA[0-9A-Z]{12,}\b"), "aws access key id (AKIA...)"),
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "PEM private key header"),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"), "bearer token"),
+]
+
+# A key name that says "this holds a credential". "key" must be bounded (so
+# "monkey"/"keyboard" do not match); the credential words match as substrings.
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(password|passwd|pwd|secret|token|credential|"
+    r"api[_-]?key|access[_-]?key|private[_-]?key|(^|[._-])keys?([._-]|$))"
+)
+
+# "password: hunter2" / "api_key=AKIA..." embedded inside a free-text string.
+_INLINE_ASSIGN_RE = re.compile(
+    r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)"
+    r"\s*[:=]\s*[\"']?([^\s\"']{6,})"
+)
+
+# Values that are obviously not a live secret — the key=value rule skips these.
+_PLACEHOLDERS = {
+    "", "x", "none", "null", "nil", "todo", "tbd", "redacted", "changeme",
+    "change-me", "placeholder", "example", "sample", "dummy", "test", "fake",
+    "your-key-here", "...",
+}
+
+
+def _looks_like_vault_pointer(v):
+    """A sanctioned indirection — `vault:staging-db`, `vault://...`, `secret-ref:...`
+    — is the ESCAPE HATCH. It names a secret without carrying one, so it passes."""
+    return isinstance(v, str) and bool(
+        re.match(r"(?i)^(vault:|secret-ref:|secretref:|op://|aws-secrets:)", v.strip())
+    )
+
+
+def _is_placeholder(v):
+    s = v.strip()
+    if s.lower() in _PLACEHOLDERS:
+        return True
+    if re.fullmatch(r"[*x.<>\[\]{}?_-]+", s):  # ***, xxxx, <...>, ----
+        return True
+    if re.fullmatch(r"(?i)<[^>]*>", s):  # <your-token>
+        return True
+    return False
+
+
+def _shannon_entropy(s):
+    if not s:
+        return 0.0
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _high_entropy_token(s):
+    """A long, dense, mixed token is almost certainly a credential. Tuned so
+    ordinary values (dotted keys, region names, words, numbers, the scene's
+    records) never trip it: needs length >= 24, a secret-ish charset, a mix of
+    letters and digits, and >= 4.0 bits/char of entropy."""
+    for tok in re.split(r"[\s\"'`,;]+", s):
+        if len(tok) < 24:
+            continue
+        if _looks_like_vault_pointer(tok) or _is_placeholder(tok):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9+/=_\-\.]{24,}", tok):
+            continue
+        has_alpha = any(c.isalpha() for c in tok)
+        has_digit = any(c.isdigit() for c in tok)
+        is_long_hex = bool(re.fullmatch(r"[0-9a-fA-F]{32,}", tok))
+        if not ((has_alpha and has_digit) or is_long_hex):
+            continue
+        if _shannon_entropy(tok) >= 4.0:
+            return True
+    return False
+
+
+def _scan_string(s):
+    for rx, name in _SECRET_PATTERNS:
+        if rx.search(s):
+            return name
+    m = _INLINE_ASSIGN_RE.search(s)
+    if m and not _is_placeholder(m.group(2)) and not _looks_like_vault_pointer(m.group(2)):
+        return "secret-shaped assignment in text"
+    if _high_entropy_token(s):
+        return "high-entropy token"
+    return None
+
+
+def _scan_value(v, in_key):
+    # key=value rule: a credential-named key with a real string value.
+    if in_key is not None and _SECRET_KEY_RE.search(in_key):
+        if (isinstance(v, str) and len(v.strip()) >= 6
+                and not _is_placeholder(v) and not _looks_like_vault_pointer(v)):
+            return "secret-shaped key=value assignment"
+    if isinstance(v, str):
+        if not _looks_like_vault_pointer(v):
+            hit = _scan_string(v)
+            if hit:
+                return hit
+    elif isinstance(v, dict):
+        for k, sub in v.items():
+            hit = _scan_value(sub, in_key=str(k))
+            if hit:
+                return hit
+    elif isinstance(v, list):
+        for sub in v:
+            hit = _scan_value(sub, in_key=None)
+            if hit:
+                return hit
+    return None
+
+
+def scan_secret(record):
+    """Return the matched pattern CLASS (never the value) if the record body —
+    reason plus effect values, recursively — looks like it carries a secret,
+    else None. Record id and parents are not scanned (they are not the body)."""
+    reason = record.get("reason")
+    if isinstance(reason, str) and not _looks_like_vault_pointer(reason):
+        hit = _scan_string(reason)
+        if hit:
+            return hit
+    return _scan_value(record.get("effects") or {}, in_key=None)
+
+
+# Witnesses report measured/ambient state. These prefixes mark an observation;
+# a witness setting anything else is reporting intent, which is the boundary the
+# warning teaches (it is a warning, never a refusal — measured state is legal).
+_OBSERVATION_PREFIXES = ("env.", "obs.", "observed.", "metric.", "metrics.",
+                         "seen.", "reading.", "sample.")
+
+
+def witness_warnings(record):
+    """Loud-but-non-fatal warnings for a witness carrying non-observation keys."""
+    if record.get("kind") != "witness":
+        return []
+    bad = [k for k in (record.get("effects") or {})
+           if not str(k).startswith(_OBSERVATION_PREFIXES)]
+    if not bad:
+        return []
+    return [
+        "witness record sets non-observation key(s): " + ", ".join(sorted(bad)),
+        "  witnesses report measured/ambient state (e.g. env.*); a key that "
+        "looks like intent (config.*, feature.*) usually belongs on a task.",
+        "  pushing anyway — a witness that reports real measured state is legal.",
+    ]
+
+
+def genesis_decision(parents, genesis_flag, count, frontier):
+    """None if the record may proceed; otherwise a teaching refusal message.
+    A root record (empty parents) is allowed only with --genesis AND an empty
+    project."""
+    if parents:
+        return None
+    if not genesis_flag:
+        msg = ("refusing an empty-parents (genesis) record without --genesis: "
+               "pass --genesis to create a project's first record.")
+        if count:
+            msg += (f" but this project already has {count} record(s) — you "
+                    "probably meant to parent to the current frontier: "
+                    f"{', '.join(frontier) or '(none)'}.")
+        return msg
+    if count:
+        return (f"refusing --genesis: this project already has {count} "
+                "record(s); genesis is only for an empty project. Parent to "
+                f"the current frontier instead: {', '.join(frontier) or '(none)'}.")
+    return None
+
+
+def _project_of(repo):
+    """The project a repo belongs to: the part before the first '--'."""
+    return repo.split("--", 1)[0]
+
+
+def _frontier_ids(records):
+    """Applied leaves — records no other record parents to — in the application
+    order /api/records already returns them in. These are what a new record
+    should usually parent to."""
+    parented = set()
+    for r in records:
+        for p in (r.get("parents") or []):
+            parented.add(p)
+    return [r["id"] for r in records
+            if r.get("id") and r["id"] not in parented and not r.get("orphan")]
+
+
+def project_records(project):
+    """The project's collected records (application order) via /api/records."""
+    q = urllib.parse.urlencode({"project": project})
+    out = http("GET", "/api/records", raw_query=q)
+    return out.get("records") or []
+
+
 def cmd_complete(args):
     effects = {}
     for kv in args.sets or []:
@@ -219,6 +437,29 @@ def cmd_complete(args):
               "effects": effects}
     if args.reason:
         record["reason"] = args.reason
+
+    # --- refusals (before any token, checkout, or push) -------------------
+    # 1. Secret refusal: never push a record whose body looks like it carries a
+    #    secret. No escape flag — the sanctioned shape is a vault pointer, which
+    #    passes the scan. The value is never echoed.
+    hit = scan_secret(record)
+    if hit:
+        die(f"refusing to push {args.id}: {hit} in the record body (value not "
+            "shown). Store the secret in your secret manager and put a pointer "
+            "in the record instead, e.g. --set db.password=vault:staging-db.")
+    # 2. Kind discipline: a witness carrying non-observation keys is warned
+    #    loudly on stderr, never refused.
+    for line in witness_warnings(record):
+        print(f"pp: warning: {line}", file=sys.stderr)
+    # 3. Genesis guard: a root record (empty parents) needs --genesis AND an
+    #    empty project. Only queries the Worker when parents are empty.
+    if not parents:
+        project = _project_of(args.repo)
+        existing = project_records(project)
+        msg = genesis_decision(parents, args.genesis, len(existing),
+                               _frontier_ids(existing))
+        if msg:
+            die(msg)
 
     token = mint_token(args.repo, "write")
     tmp = tempfile.mkdtemp(prefix="pp-complete-")
@@ -399,6 +640,9 @@ def main(argv=None):
                    help="k=v; v is parsed as JSON when possible")
     p.add_argument("--reason")
     p.add_argument("--work", help="directory whose files join the commit")
+    p.add_argument("--genesis", action="store_true",
+                   help="allow an empty-parents root record (only on a project "
+                        "with no records yet; see Refusals in runner/README.md)")
     p.set_defaults(fn=cmd_complete)
 
     p = sub.add_parser("state")
