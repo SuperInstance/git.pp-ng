@@ -168,5 +168,23 @@ await probe("GET /api/debug/log?repo=bad name -> 400", null,
   () => R("GET", "/api/debug/log?repo=bad%20name", { key: KEY }),
   (res, body, { calls }) => [...status(400)(res), ...(calls.get.length ? ["binding get() called with unvalidated name"] : [])]);
 
+// 13. Duplicate repo create: the binding's "already exists" rejection is a
+// client conflict — a clean 409 with a stable body, never a 500. A binding
+// failure that is NOT a duplicate still surfaces as the bare 500 (no leak).
+await probe("POST /api/repos duplicate name -> 409", ({ env }) => {
+    env.ARTIFACTS.create = async () => { throw new Error("a repository with this name already exists"); };
+  },
+  () => R("POST", "/api/repos", { key: KEY, json: true, body: JSON.stringify({ name: "poc-quilt-1" }) }),
+  (res, body) => [
+    ...status(409)(res),
+    ...(body.includes('"repo already exists"') ? [] : ["409 body should carry the stable error string"]),
+    ...(body.includes('"poc-quilt-1"') ? [] : ["409 body should name the repo"]),
+  ]);
+await probe("POST /api/repos binding failure (not a duplicate) -> clean 500", ({ env }) => {
+    env.ARTIFACTS.create = async () => { throw new Error("binding exploded: /internal/path/xyz"); };
+  },
+  () => R("POST", "/api/repos", { key: KEY, json: true, body: JSON.stringify({ name: "probe-new" }) }),
+  (res, body) => [...status(500)(res), ...has("/internal/path/xyz")(res, body), ...has("binding exploded")(res, body), ...has('"message"')(res, body)]);
+
 console.log(failures === 0 ? "\nALL PROBES PASS" : `\n${failures} probe(s) failing`);
 process.exit(failures === 0 ? 0 : 1);
