@@ -36,7 +36,7 @@ The state of the repository is derived through a pure function called `fold(reco
 
 ## Determinism, measured
 
-Measured, not asserted: the same completions folded in 50 shuffled arrival orders produce identical state, conflicts, and application order. The TypeScript implementation in `src/fold.ts` was checked against the Python reference (`referee/fold.py`) on 855 generated cases and 1,014 checkpoint probes (plus 3,224 witness-freshness checks and 2,812 brute-force maximality-oracle checks) — zero divergences (harness in `conformance/`).
+Measured, not asserted: the same completions folded in 50 shuffled arrival orders produce identical state, conflicts, and application order. The TypeScript implementation in `src/fold.ts` was checked against the Python reference (`referee/fold.py`) on 863 generated cases and 1,029 checkpoint probes (plus 3,231 witness-freshness checks, 16,290 closure-root digests, and 2,812 brute-force maximality-oracle checks) — zero divergences (harness in `conformance/`).
 
 ## Seeing versus doing
 

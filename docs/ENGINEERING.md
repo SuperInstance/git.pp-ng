@@ -292,10 +292,12 @@ with the reason stated.
 
 ## Conformance & integration totals (this branch)
 
-- Conformance: **855/855 cases identical** — derive + **1,014 checkpoint
-  probes** + **3,224 witness-freshness checks**; plus the brute-force maximality
-  oracle & parents-order invariance (**2,812 checks**), the non-finite transport
-  pin (**3**), and live-golden byte-identity (**8**). `python3 conformance/harness.py`.
+- Conformance: **863/863 cases identical** — derive + **1,029 checkpoint
+  probes** + **3,231 witness-freshness checks** + **16,290 closure-root
+  digests**; plus the brute-force maximality oracle & parents-order
+  invariance (**2,812 checks**), the non-finite transport pin (**3**), and
+  live-golden byte-identity (**8**). `python3 conformance/harness.py`
+  (totals re-verified on this HEAD, 2026-10-14).
 - Integration: **22 passed, 0 failed** against the live base URL, including the
   `poc-scale-1` scale assertions (62 records, 3 conflicts, 0 orphans, winners
   t30/t09/t59) and the `/api/state` latency line.

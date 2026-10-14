@@ -95,15 +95,15 @@ is no cache to invalidate.
 ## Conformance (the fold is proven, not trusted)
 
 `referee/fold.py`, the Python reference implementation of the fold,
-is the referee. `conformance/harness.py` generates 839 cases — the
+is the referee. `conformance/harness.py` generates 863 cases — the
 property fixtures, a stress suite of 200 random DAGs in
 multiple orderings, the live PoC record set, and adversarial edges
 (cycles, duplicate ids, unknown kinds, bool/int value collisions,
 unicode) — computes expected outputs with the referee at run time,
-executes `src/fold.ts` under Node, and diffs derive outputs and 960
+executes `src/fold.ts` under Node, and diffs derive outputs and 1,029
 checkpoint-verification probes exactly.
 
-Latest run: **839/839 cases identical, 960/960 probes equal.**
+Latest run (2026-10-14): **863/863 cases identical, 1,029/1,029 probes equal** — plus 3,231 witness-freshness checks and 16,290 closure-root digests, all matching.
 Re-run: `cd conformance && python3 harness.py`
 
 ## Data notes
