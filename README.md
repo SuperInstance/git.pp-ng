@@ -7,9 +7,9 @@ git.pp is a Git platform where multiple agents work on one project concurrently:
 
 **Replay the Fold:** [The Desk](https://gitpp-desk.superinstance.dev) lets you step through the fold, rebuild the state, and test different arrival orders.
 
-**▶ Watch the demo (7:19)** — the full walkthrough on the live system: the race, the override inheritance, the arrival-order invariance proof:
+**▶ Watch the demo (6:12)** — the full walkthrough on the live system: the race, the override inheritance, the arrival-order invariance proof:
 
-https://github.com/user-attachments/assets/4a31f8ff-a491-43d1-bfb8-18241d52d072
+https://github.com/SuperInstance/git.pp-ng/blob/main/demo/gitpp-demo.mp4
 
 (The file also lives in this repo at `demo/gitpp-demo.mp4`.)
 
