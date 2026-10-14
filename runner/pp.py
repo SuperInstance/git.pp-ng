@@ -36,7 +36,7 @@ Refusals (checked before anything is pushed — the fold is unchanged):
 
 Config (environment):
   PP_WORKER           Worker base URL
-                      (default https://gitpp.casey-digennaro.workers.dev)
+                      (default https://gitpp.superinstance.dev)
   PP_ADMIN_KEY        admin key for gated routes; overrides the key file
   PP_ADMIN_KEY_FILE   key file path (default ../.admin-key.local relative
                       to this script — the build tree's mode-600 file).
@@ -72,7 +72,7 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WORKER = os.environ.get("PP_WORKER", "https://gitpp.casey-digennaro.workers.dev").rstrip("/")
+WORKER = os.environ.get("PP_WORKER", "https://gitpp.superinstance.dev").rstrip("/")
 ACCOUNT = os.environ.get("PP_ARTIFACTS_ACCOUNT", "049ff5e84ecf636b53b162cbb580aae6")
 NS = os.environ.get("PP_ARTIFACTS_NS", "default")
 POC_DIR = Path(os.environ.get("PP_POC_DIR", HERE.parent / "referee"))

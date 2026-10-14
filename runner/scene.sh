@@ -25,7 +25,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PP=(python3 "$HERE/pp.py")
-WORKER="${PP_WORKER:-https://gitpp.casey-digennaro.workers.dev}"
+WORKER="${PP_WORKER:-https://gitpp.superinstance.dev}"
 export PP_POC_DIR="${PP_POC_DIR:-$(cd "$HERE/../.." && pwd)/poc}"
 
 SUFFIX="$(python3 -c 'import secrets; print(secrets.token_hex(3))')"

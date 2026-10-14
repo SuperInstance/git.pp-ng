@@ -24,7 +24,7 @@
  * the updated Worker is deployed the pending assertions run for real.
  */
 
-const BASE = (process.env.GITPP_BASE || "https://gitpp.casey-digennaro.workers.dev").replace(/\/+$/, "");
+const BASE = (process.env.GITPP_BASE || "https://gitpp.superinstance.dev").replace(/\/+$/, "");
 const PROJECT = "poc-quilt-1";
 
 let passed = 0;
