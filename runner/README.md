@@ -2,7 +2,7 @@
 
 Everything here runs on **bash + git + curl + python3 (stdlib only)**.
 No installs, no build step, no wrangler. You are talking to the live
-Worker (`https://gitpp.casey-digennaro.workers.dev`) and real
+Worker (`https://gitpp.superinstance.dev`) and real
 Cloudflare Artifacts repos through it.
 
 - `pp.py` — the agent-side CLI (one file).
@@ -145,9 +145,9 @@ the end of every run):
 ```bash
 export PP_ADMIN_KEY="$(cat ../.admin-key.local)"   # from runner/
 curl -X DELETE -H "X-Admin-Key: $PP_ADMIN_KEY" \
-  https://gitpp.casey-digennaro.workers.dev/api/repos/demo-XXXXXX
+  https://gitpp.superinstance.dev/api/repos/demo-XXXXXX
 curl -X DELETE -H "X-Admin-Key: $PP_ADMIN_KEY" \
-  https://gitpp.casey-digennaro.workers.dev/api/repos/demo-XXXXXX--task-a
+  https://gitpp.superinstance.dev/api/repos/demo-XXXXXX--task-a
 # …and the --task-b, --task-d, --task-c forks, same shape.
 ```
 

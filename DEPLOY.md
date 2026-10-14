@@ -6,7 +6,7 @@ the Worker creates/forks repos through the Artifacts binding, reads
 records back through the same binding (no git clone), derives current
 state with a deterministic fold, and renders the projection.
 
-**Live:** https://gitpp.casey-digennaro.workers.dev
+**Live:** https://gitpp.superinstance.dev
 Try: `/?project=poc-quilt-1` (projection) · `/api/state?project=poc-quilt-1`
 
 ## Layout

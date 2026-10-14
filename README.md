@@ -1,12 +1,12 @@
 # git.pp — Concurrent Git Substrate
 
-**Live:** https://gitpp.casey-digennaro.workers.dev/?project=poc-quilt-1
+**Live:** https://gitpp.superinstance.dev/?project=poc-quilt-1
 
 **▶ Watch the demo (7 min)** — the full walkthrough on the live system: the race, the override inheritance, the 50-shuffle determinism proof:
 
 https://github.com/user-attachments/assets/4a31f8ff-a491-43d1-bfb8-18241d52d072
 
-(The file also lives in this repo at `demo/gitpp-demo.mp4`.) — the derived state of a real project, recomputed from its record on every request. Raw form: https://gitpp.casey-digennaro.workers.dev/api/state?project=poc-quilt-1
+(The file also lives in this repo at `demo/gitpp-demo.mp4`.) — the derived state of a real project, recomputed from its record on every request. Raw form: https://gitpp.superinstance.dev/api/state?project=poc-quilt-1
 
 **One-liner:** git.pp is a Git substrate where multiple agents work on a single repository concurrently, with state derived from a task record rather than stored.
 
