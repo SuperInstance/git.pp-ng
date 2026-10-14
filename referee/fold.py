@@ -22,6 +22,7 @@ the lexicographically smallest id. More deeds behind a value makes it cleaner;
 more bare observations, weaker.
 """
 
+import hashlib
 import heapq
 import json
 
@@ -78,6 +79,94 @@ def _parents(rec):
 
 def _effects(rec):
     return {str(k): v for k, v in (rec.get("effects") or {}).items()}
+
+
+# --------------------------------------------------------------------------
+# checkpoint v2 — closure-root pinning (see docs/CHECKPOINT-V2.md, DESIGN §6).
+# A checkpoint v1 is relative to the record SET it is verified against; a
+# closure-root digest pins the exact closure of `at` so a later-changed closure
+# is reported as STATE-ONLY instead of silently re-verifying. The digest is
+# SHA-256 over a canonical, float64-domain encoding so a third implementation
+# (and src/fold.ts) reproduces it byte-for-byte.
+# --------------------------------------------------------------------------
+
+def _leaf_num(v):
+    """Encode a number for the leaf in the float64 domain, one canonical form
+    both ports compute identically. An integral value with |v| < 1e21 is written
+    as its EXACT decimal integer (``int(v)``, no trailing ``.0``); the TS port
+    pairs this with ``BigInt(v)`` (not ``String(v)``, whose shortest round-trip
+    diverges from the exact integer for integral doubles in ``[1e16, 1e21)``).
+    Other finite values keep Python's ``repr``/``json.dumps`` float form
+    (shortest round-trip, scientific with a zero-padded exponent when
+    ``decpt <= -4`` or ``> 16``), which ``src/fold.ts`` reproduces from
+    ``Number.toExponential()``. Recurses through containers; bool is left as a
+    distinct JSON type."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
+        return int(v)
+    if isinstance(v, list):
+        return [_leaf_num(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _leaf_num(x) for k, x in v.items()}
+    return v
+
+
+def _record_leaf(rec):
+    """SHA-256 hex of a record's WHOLE canonical content: id, parents (as a set,
+    sorted by code point), kind (raw), effects (float64-canonicalised and
+    leaf-number-encoded), and reason (raw, null if absent). Hashing the whole
+    record — reason included — means any content tamper changes the leaf, so it
+    is caught: a tamper that alters derived state is MISMATCH, and a reason
+    re-version (which the fold ignores, so derived state is unchanged) is
+    STATE-ONLY rather than a silent VERIFIED."""
+    normalized = {
+        "id": str(rec.get("id", "")),
+        "parents": sorted(_parents(rec)),
+        "kind": rec.get("kind"),
+        "effects": {k: _leaf_num(_canon_num(v)) for k, v in _effects(rec).items()},
+        "reason": rec.get("reason"),
+    }
+    canon = json.dumps(normalized, sort_keys=True, ensure_ascii=True,
+                       separators=(", ", ": "))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _closure_ids(at, idx, parents):
+    """`at` plus all transitive parents within idx. None if any ancestor is
+    absent (an incomplete closure cannot be verified or digested)."""
+    closure, stack = set(), [at]
+    while stack:
+        n = stack.pop()
+        if n in closure:
+            continue
+        closure.add(n)
+        for p in parents.get(n, ()):
+            if p not in idx:
+                return None
+            stack.append(p)
+    return closure
+
+
+def checkpoint_root(records, at):
+    """Deterministic digest of `at`'s full ancestor closure as seen in `records`.
+    None if `at` is absent or its closure is incomplete.
+
+        closureRoot = SHA-256( "\\n".join( id + ":" + leaf(rec)
+                               for id in sorted(closureIds, code-point) ) )
+
+    where leaf(rec) = SHA-256( json.dumps({id, parents sorted, kind, effects,
+    reason}, sort_keys=True, ensure_ascii=True) ), both as lowercase hex."""
+    idx = _index(records)
+    at = str(at)
+    if at not in idx:
+        return None
+    parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    closure = _closure_ids(at, idx, parents)
+    if closure is None:
+        return None
+    entries = [f"{rid}:{_record_leaf(idx[rid])}" for rid in sorted(closure)]
+    return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
 
 
 def _rank(rec):
@@ -223,41 +312,46 @@ def derive(records):
 
 
 def verify_checkpoint(records, checkpoint):
-    """True only if deriving from exactly the ancestors of checkpoint['at'] (incl. it)
-    reproduces checkpoint['state']. A missing 'at' record, or any missing ancestor
-    (so the ancestor set is incomplete and nothing can be verified), returns False."""
+    """Verify a checkpoint against `records`.
+
+    v1 (no `closureRoot` in the checkpoint): returns a bool — True iff deriving
+    from exactly the ancestors of checkpoint['at'] (incl. it) reproduces
+    checkpoint['state']. A missing 'at', a missing ancestor, or a bad shape
+    returns False. Unchanged from before.
+
+    v2 (a `closureRoot` is present): returns a three-way string —
+      "VERIFIED"   state matches AND the closure digest matches the pinned root;
+      "STATE-ONLY" state matches but the closure has changed since the checkpoint
+                   (the honest v1 answer, now labelled — never a silent VERIFIED);
+      "MISMATCH"   the state differs (or the checkpoint shape is unusable).
+    Backwards compatible: callers that pass no root get exactly v1 behaviour."""
     if not isinstance(checkpoint, dict):
         return False
+    expected_root = checkpoint.get("closureRoot")
+    v2 = expected_root is not None
     at, want = checkpoint.get("at"), checkpoint.get("state")
     if at is None or not isinstance(want, dict):
-        return False
+        return "MISMATCH" if v2 else False
     at = str(at)
     # Compare the declared state in the SAME number domain the fold uses:
     # float64-canonicalise the checkpoint's values exactly as derive()
-    # canonicalises record effects. Without this the referee compares a
-    # non-JS-safe int exactly while the TS port has already rounded it at
-    # JSON.parse, so the same checkpoint verifies differently in the two ports
-    # (ADDENDUM #4 P1). A value that denotes a DISTINCT double is still
-    # rejected; one that denotes the same double is accepted, identically.
+    # canonicalises record effects (ADDENDUM #4 P1).
     want = {k: _canon_num(v) for k, v in want.items()}
 
     idx = _index(records)
-    if at not in idx:
-        return False
     parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    state_ok = False
+    if at in idx:
+        closure = _closure_ids(at, idx, parents)
+        if closure is not None:
+            state_ok = derive([idx[r] for r in sorted(closure)])["state"] == want
 
-    closure, stack = set(), [at]
-    while stack:
-        n = stack.pop()
-        if n in closure:
-            continue
-        closure.add(n)
-        for p in parents.get(n, ()):
-            if p not in idx:
-                return False
-            stack.append(p)
-
-    return derive([idx[r] for r in sorted(closure)])["state"] == want
+    if not v2:
+        return state_ok
+    if not state_ok:
+        return "MISMATCH"
+    actual_root = checkpoint_root(records, at)
+    return "VERIFIED" if actual_root == str(expected_root) else "STATE-ONLY"
 
 
 def witness_freshness(records):

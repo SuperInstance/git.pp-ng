@@ -337,6 +337,102 @@ _LIVE = json.loads((HERE / "live-records.json").read_text())
 for _proj, _recs in _LIVE.items():
     add(f"live-{_proj}", _recs, ats=[])
 
+# --- SPIKE: checkpoint v2 — closure-root pinning --------------------------
+# Each case pins a v2 probe (state + closureRoot) and the harness compares the
+# three-way verify result Python-vs-TS, plus every applied id's digest (see
+# main()'s `roots` comparison). The expected roots/states are computed here by
+# the referee so a divergence in either port shows up as a verify mismatch.
+
+def _v2_case(name, records, at, state, closure_root):
+    CASES.append({"name": name, "records": [dict(r) for r in records],
+                  "probes": [{"at": at, "state": state, "closureRoot": closure_root}]})
+
+# (a) VERIFIED — root pinned over the very set being verified.
+_Sa = [R("g", [], "task", {"k": 1}),
+       R("a", ["g"], "task", {"k": 1}),
+       R("c", ["a"], "witness", {})]
+_root_a = ref.checkpoint_root([dict(r) for r in _Sa], "c")
+_state_a = closure_state(_Sa, "c")
+_v2_case("ckpt-v2-verified", _Sa, "c", _state_a, _root_a)
+
+# (b) STATE-ONLY — a later-arriving ancestor grows at's closure; the derived
+# state is unchanged, but the pinned root (taken over the smaller S0) no longer
+# matches. Never a silent VERIFIED. S0: closure(R) = {g, R}. S1: R re-versioned
+# to also parent m, so closure(R) = {g, m, R}; m (task, k=1) keeps state {k:1}.
+_S0 = [R("g", [], "task", {"k": 1}), R("R", ["g"], "witness", {})]
+_S1 = [R("g", [], "task", {"k": 1}),
+       R("m", ["g"], "task", {"k": 1}),
+       R("R", ["g", "m"], "witness", {})]
+_root_b0 = ref.checkpoint_root([dict(r) for r in _S0], "R")   # pinned over S0
+_state_b = closure_state(_S1, "R")                            # {k:1} in S1 too
+_v2_case("ckpt-v2-state-only-grown", _S1, "R", _state_b, _root_b0)
+
+# (c) MISMATCH — the declared state is wrong (root present).
+_v2_case("ckpt-v2-mismatch-state", _Sa, "c", {"k": 999}, _root_a)
+
+# (d) tampered root — state matches but the pinned root is forged; must be
+# STATE-ONLY (not VERIFIED), never silently accepted.
+_v2_case("ckpt-v2-tampered-root", _Sa, "c", _state_a,
+         "0000000000000000000000000000000000000000000000000000000000000000")
+
+# (e) the frozen live project: VERIFIED at task-c over the exact live set, and
+# a regression pin on the digest value stated in the PR.
+_POC = _LIVE["poc-quilt-1"]
+_root_poc = ref.checkpoint_root([dict(r) for r in _POC], "task-c")
+_v2_case("ckpt-v2-live-poc-quilt-1", _POC, "task-c",
+         closure_state(_POC, "task-c"), _root_poc)
+# Whole-content leaf (FIX 3): the closure root over task-c's closure. Changed
+# from the fold-relevant-only spike value (891aa330…) because the leaf now
+# covers each record's whole canonical content (reason included).
+POC_QUILT1_TASK_C_ROOT = "60effe23970d8a5cc837636c44685502361288c1f00577e9addfa10cbd4fc91d"
+
+# --- FIX 1: leaf-number canonical form, cross-port --------------------------
+# Record effects carrying the float values that split Python's json.dumps from
+# a naive JS String(): exponent-range floats (Python zero-pads the exponent —
+# 1e-05, 2.5e-07 — where JS String gives 0.00001 / 2.5e-7), signed zero
+# (-0.0 → "0" in the leaf, not "-0.0"), and a small-exponent float (1e-100).
+# main()'s `roots` check compares every applied id's closure-root digest
+# Python-vs-TS, so the corpus now SAMPLES these splitters.
+# (Integral doubles in [1e16, 1e21) also split — Python's exact int() vs JS's
+# shortest round-trip — and the leaf fix pins them to BigInt exact digits; that
+# path is proven by the 40k-value cross-port fuzz quoted in the PR rather than a
+# state-visible case here, since such a value in STATE exposes an unrelated JSON
+# round-trip subtlety outside this change's scope.)
+add("ckpt-v2-leaf-floats", [
+    R("g", [], "task", {"tiny": 1e-5, "tinier": 2.5e-7, "negzero": -0.0}),
+    R("a", ["g"], "task", {"frac": 1.5}),
+    R("c", ["a"], "witness", {"sci": 1e-100}),
+], ats=["g", "a", "c"])
+
+# --- FIX 3: whole-record leaf catches a reason-only re-version --------------
+# The leaf now covers `reason`, which the fold ignores, so re-versioning a
+# closure member's reason leaves derived state unchanged but changes the
+# closure root. The result is STATE-ONLY (the member re-versioned), never the
+# silent VERIFIED the fold-relevant-only spike leaf gave. A state-affecting
+# tamper stays MISMATCH (see ckpt-v2-mismatch-state).
+_Sr = [R("g", [], "task", {"k": 1}),
+       R("o", ["g"], "override", {"k": 2}, reason="captain: original reason"),
+       R("t", ["o"], "task", {"j": 3})]
+_Sr_tampered = [R("g", [], "task", {"k": 1}),
+                R("o", ["g"], "override", {"k": 2}, reason="FORGED: different reason"),
+                R("t", ["o"], "task", {"j": 3})]
+_root_r = ref.checkpoint_root([dict(r) for r in _Sr], "t")
+_state_r = closure_state(_Sr, "t")
+_v2_case("ckpt-v2-reason-verified", _Sr, "t", _state_r, _root_r)
+_v2_case("ckpt-v2-reason-tamper", _Sr_tampered, "t", _state_r, _root_r)
+
+# Explicit three-way result pins for the semantic cases (the harness otherwise
+# only proves the two ports AGREE; these pin WHICH answer is correct). Checked
+# in main() against the referee.
+CKPT_V2_EXPECTED = {
+    "ckpt-v2-verified": "VERIFIED",
+    "ckpt-v2-state-only-grown": "STATE-ONLY",
+    "ckpt-v2-mismatch-state": "MISMATCH",
+    "ckpt-v2-tampered-root": "STATE-ONLY",
+    "ckpt-v2-reason-verified": "VERIFIED",
+    "ckpt-v2-reason-tamper": "STATE-ONLY",
+}
+
 
 def _ancestors(start, parents, restrict=None):
     """Full ancestor set of `start` (optionally restricted to `restrict`)."""
@@ -491,9 +587,13 @@ def main():
     for case in CASES:
         name = case["name"]
         exp_derive = derive([dict(r) for r in case["records"]])
-        exp_verify = [verify([dict(r) for r in case["records"]],
-                             {"at": p["at"], "state": p["state"]})
-                      for p in case["probes"]]
+        # Pass closureRoot through so v2 probes get the three-way result; probes
+        # without it get the v1 bool, unchanged.
+        exp_verify = [
+            verify([dict(r) for r in case["records"]],
+                   {k: p[k] for k in ("at", "state", "closureRoot") if k in p})
+            for p in case["probes"]
+        ]
         got = ts_results.get(name)
         if got is None:
             divergences.append((name, "missing from TS results"))
@@ -511,10 +611,17 @@ def main():
         if got.get("freshness") != exp_fresh:
             divergences.append(
                 (name, f"freshness differs: py={exp_fresh} ts={got.get('freshness')}"))
+        # checkpoint v2: every applied id's closure-root digest must be identical
+        # across ports (SPIKE).
+        exp_roots = {rid: ref.checkpoint_root([dict(r) for r in case["records"]], rid)
+                     for rid in exp_derive["order"]}
+        if got.get("roots") != exp_roots:
+            divergences.append((name, "closure-root digests differ"))
 
     total_probes = sum(len(c["probes"]) for c in CASES)
     total_witnesses = sum(
         len(ref.witness_freshness([dict(r) for r in c["records"]])) for c in CASES)
+    total_roots = sum(len(derive([dict(r) for r in c["records"]])["order"]) for c in CASES)
     if divergences:
         print(f"\nDIVERGENCES: {len(divergences)} case(s):")
         for name, why in divergences[:20]:
@@ -529,15 +636,36 @@ def main():
         oracle_checks = differential_oracle()
         pin_checks = transport_pin()
         golden_checks = live_golden()
+        # SPIKE: pin the frozen poc-quilt-1 @task-c closure-root digest value so
+        # a change to the digest construction is caught (and matches the PR).
+        actual_poc = ref.checkpoint_root(
+            [dict(r) for r in _LIVE["poc-quilt-1"]], "task-c")
+        assert actual_poc == POC_QUILT1_TASK_C_ROOT, \
+            f"poc-quilt-1@task-c root changed: {actual_poc}"
+        # Pin the three-way verify result for each semantic checkpoint case so
+        # the suite asserts WHICH answer is correct, not only that the ports
+        # agree. In particular ckpt-v2-reason-tamper must be STATE-ONLY (caught,
+        # never a silent VERIFIED).
+        _by_name = {c["name"]: c for c in CASES}
+        for _nm, _want in CKPT_V2_EXPECTED.items():
+            _c = _by_name[_nm]
+            _got = verify([dict(r) for r in _c["records"]],
+                          {k: _c["probes"][0][k]
+                           for k in ("at", "state", "closureRoot")
+                           if k in _c["probes"][0]})
+            assert _got == _want, \
+                f"{_nm}: expected {_want}, referee gave {_got}"
     except AssertionError as e:
         print(f"\nPROPERTY FAILURE: {e}")
         return 1
 
     print(f"\nCONFORMANCE: {len(CASES)}/{len(CASES)} cases identical "
           f"(derive + {total_probes} checkpoint probes "
-          f"+ {total_witnesses} witness-freshness checks); "
+          f"+ {total_witnesses} witness-freshness checks "
+          f"+ {total_roots} closure-root digests); "
           f"oracle+invariance {oracle_checks}, transport-pin {pin_checks}, "
-          f"live-golden {golden_checks} — all pass")
+          f"live-golden {golden_checks}, poc-quilt-1@task-c root "
+          f"{POC_QUILT1_TASK_C_ROOT[:12]}… — all pass")
     return 0
 
 
