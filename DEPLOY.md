@@ -48,7 +48,11 @@ branches that never saw it — inheritance by construction.
 | `/api/repos/<name>` | DELETE | admin | delete repo |
 | `/api/debug/log?repo=` | GET | admin | raw binding `log()` passthrough |
 | `/api/last-event` | GET | admin | latest push-event envelope (KV `EVENTS`, key `last-push`) |
-| `/api/events` | POST | — | manual event ingest to the same KV key (observability) |
+
+There is no event-ingest route: the only writer of the KV `last-push`
+mirror is the Queue consumer, fed by Artifacts event subscriptions.
+(A public `POST /api/events` existed in the demo build and was removed
+in the production pass — finding F2.)
 
 Admin auth: header `X-Admin-Key` must equal the `ADMIN_KEY` Worker
 secret. Fails closed (401) when the secret is unset or the header is
