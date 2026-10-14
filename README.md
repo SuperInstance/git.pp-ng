@@ -1,18 +1,30 @@
-# git.pp — Concurrent Git Substrate
+# git.pp — A Git Platform for Concurrent Work
 
-**Live:** https://gitpp.superinstance.dev/?project=poc-quilt-1
+git.pp is a Git platform where multiple agents work on one project concurrently: the atom is the **task**, each task works in its own repository forked from a shared baseline, and project state is never stored — it is derived by folding the append-only record of task completions.
 
-**▶ Watch the demo (7 min)** — the full walkthrough on the live system: the race, the override inheritance, the 50-shuffle determinism proof:
+**Live Example:** [Explore a live project](https://gitpp.superinstance.dev/?project=poc-quilt-1)
+*Raw state:* [API endpoint](https://gitpp.superinstance.dev/api/state?project=poc-quilt-1) · *Records:* [API endpoint](https://gitpp.superinstance.dev/api/records?project=poc-quilt-1)
+
+**Replay the Fold:** [The Desk](https://gitpp-desk.superinstance.dev) lets you step through the fold, rebuild the state, and test different arrival orders.
+
+**▶ Watch the demo (7:19)** — the full walkthrough on the live system: the race, the override inheritance, the arrival-order invariance proof:
 
 https://github.com/user-attachments/assets/4a31f8ff-a491-43d1-bfb8-18241d52d072
 
-(The file also lives in this repo at `demo/gitpp-demo.mp4`.) — the derived state of a real project, recomputed from its record on every request. Raw form: https://gitpp.superinstance.dev/api/state?project=poc-quilt-1
+(The file also lives in this repo at `demo/gitpp-demo.mp4`.)
 
-**One-liner:** git.pp is a Git substrate where multiple agents work on a single repository concurrently, with state derived from a task record rather than stored.
+## Mechanism
 
-## What it is
+- The atom is the **task**. For each task, a dedicated **Artifacts repository** is forked from a shared baseline, with a repo-scoped token, and agents push their competing completions into an append-only record. Project state is not stored anywhere — it is derived by folding the record.
+- **Resolution is mechanical.** Class precedence is absolute: `override` > `task` > `witness`. Within a class, a candidate that is an ancestor of another candidate is dominated and drops out; the survivors are the most-derived. Any remaining tie breaks toward the candidate with the most intent records (`task` + `override`) in its ancestry, then the fewest `witness` records, then the lexicographically smallest `id`. Losing versions are preserved in their own repositories and stay cloneable.
 
-In git.pp, the atom is the **task**. For each task, a dedicated **Artifacts repository** is forked from a shared baseline, with a repo-scoped token, and agents push their competing completions into an append-only record. Project state is not stored anywhere — it is derived by folding the record.
+## Fact Sheet
+
+- **Conformance:** 863/863 cases identical; 1,029 checkpoint probes; 3,231 witness-freshness checks; 16,290 closure-root digests; 2,812 oracle checks; 3 transport pins; 8 live-golden checks.
+- **Scale project:** 62 records; 3 conflicts; 21 losers preserved. The fold runs in 12 ms over the 62-record project.
+- **Race scenario:** Five pairs of agents pushed simultaneously; one 10-way conflict; all 9 losers preserved.
+- **Live reads:** derived state reads take 2.9–5.7 s.
+- An override's 45 stands against a later push of 99 — checkable at the records link above.
 
 ## The record model
 
@@ -44,15 +56,11 @@ A `witness` record carries an observation and no intent. Its uncontested observa
 
 ## Inheritance
 
-A reasoned `override` joins the record and binds its descendants, including branches forked before the override existed. Watch it happen: in the live project above, `task-d` pushed `config.timeout: 99` *after* the override — and the derived state is still `45`, with `task-d` named in the conflict's losers. Its ancestry never passes through `override-1`, so the override binds it. Replay the whole scene yourself with `runner/scene.sh`, or read the state endpoint and check the losers list.
+A reasoned `override` joins the record and binds every later derivation — including branches forked before the override existed, and branches that never descend from it — because derivation reads the whole record, and an override outranks a task wherever it sits. Watch it happen: in the live project above, `task-d` pushed `config.timeout: 99` *after* the override — and the derived state is still `45`, with `task-d` named in the conflict's losers. `task-d`'s ancestry never passes through `override-1`; the override binds it anyway. Replay the whole scene yourself with `runner/scene.sh`, or read the state endpoint and check the losers list.
 
 ## Checkpoints
 
-Checkpoints allow you to name a record position. Verification re-derives the state at that position, and any tampered checkpoints are rejected.
-
-## Scoped defaults
-
-The system uses scoped defaults with the following hierarchy: global → org → user → repo → folder → file. The narrowest scope takes precedence.
+A checkpoint pins a derived state together with the closure root of the records that produced it. Verification re-derives both and returns one of three verdicts — VERIFIED, STATE-ONLY, or MISMATCH — so a tamper that touches only a record's reason, invisible to the derived state, reads STATE-ONLY, never a silent pass.
 
 ## Run it yourself
 
