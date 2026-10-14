@@ -687,10 +687,23 @@ async function handleCreateRepo(request: Request, env: Env): Promise<Response> {
   if (typeof name !== "string" || !NAME_RE.test(name)) {
     return json({ error: "body {name} required, [A-Za-z0-9._-], max 100" }, 400);
   }
-  const meta = await env.ARTIFACTS.create(name, {
-    setDefaultBranch: "main",
-    description: typeof body?.description === "string" ? body.description : undefined,
-  });
+  let meta: RepoMeta;
+  try {
+    meta = await env.ARTIFACTS.create(name, {
+      setDefaultBranch: "main",
+      description: typeof body?.description === "string" ? body.description : undefined,
+    });
+  } catch (err) {
+    // A duplicate name is a client conflict, not a Worker fault: the
+    // binding rejects it, and that rejection answers 409 with a stable
+    // body instead of escaping as a 500. Any other binding failure
+    // rethrows and surfaces as the bare 500.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/already exists/i.test(msg)) {
+      return json({ error: "repo already exists", name }, 409);
+    }
+    throw err;
+  }
   return json({ created: publicMeta(meta) }, 201);
 }
 
