@@ -17,6 +17,7 @@
 import {
   derive,
   deriveDelta,
+  recordLeaf,
   witnessFreshness,
   type Checkpoint,
   type DeriveOutput,
@@ -275,8 +276,36 @@ async function mapBounded<T, R>(
 
 interface CollectionWarning {
   id: string;
-  keptFrom: string | null;
-  droppedFrom: string;
+  // Divergent-duplicate warnings (the original shape): the repo the kept
+  // copy came from and the repo the dropped copy came from.
+  keptFrom?: string | null;
+  droppedFrom?: string;
+  // Format v2 (docs/FORMAT-V2.md): a record whose well-formed born digest
+  // disagrees with its own content — {kind: "digest-mismatch", claimed,
+  // computed}. The record is treated exactly as v1 (degrade-and-warn,
+  // never reject); the fold never sees the claim at all.
+  kind?: "digest-mismatch";
+  claimed?: string;
+  computed?: string;
+}
+
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** Format v2 digest verification (docs/FORMAT-V2.md): if a collected copy
+ * carries a WELL-FORMED born digest, check the claim against the copy's own
+ * content via the TS checkpoint-v2 leaf. Returns a digest-mismatch warning
+ * on disagreement, null otherwise — including when the field is absent
+ * (a v1 record: nothing to verify, nothing to warn) or malformed (not a
+ * claim at all; envelope noise under DESIGN §1, ignored like any other
+ * extra field). Verification is an annotation on collection only: the
+ * record passes through unchanged either way, and no disagreement can
+ * reject it — a lying digest degrades the record to exactly v1 treatment. */
+function digestWarning(rec: FoldRecord): CollectionWarning | null {
+  const claimed = (rec as { digest?: unknown }).digest;
+  if (typeof claimed !== "string" || !DIGEST_RE.test(claimed)) return null;
+  const computed = "sha256:" + recordLeaf(rec);
+  if (claimed === computed) return null;
+  return { id: rec.id, kind: "digest-mismatch", claimed, computed };
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +536,21 @@ async function collectProject(
     if (!rec || typeof rec.id !== "string") continue;
     if (plan[i].tail) tail.push(rec);
     else servedFromCache.add(rec.id);
-    const norm = JSON.stringify(rec);
+    // Format v2: every collected copy's born-digest claim is verified
+    // against its own content — kept and dropped copies alike, since a
+    // dropped copy's lie is still a fact about the record worth surfacing.
+    const dw = digestWarning(rec);
+    if (dw) warnings.push(dw);
+    // Divergence is judged on content with the digest claim set aside: a
+    // digest is a claim ABOUT the record, not part of what the record
+    // says, so two copies differing only in `digest` have not diverged —
+    // the wrong one earns a digest-mismatch warning above, never a
+    // divergent-duplicate warning here. ("Digests match" must also never
+    // stand in for "contents match": the comparison below is over the
+    // full remaining content, digest or no digest.)
+    const contentRec: FoldRecord = { ...rec };
+    delete contentRec.digest;
+    const norm = JSON.stringify(contentRec);
     if (!byId.has(rec.id)) {
       byId.set(rec.id, rec);
       origin.set(rec.id, plan[i].repo);
@@ -604,6 +647,11 @@ interface RecordView {
   parents: unknown;
   effects: unknown;
   reason: unknown;
+  // Format v2: the record's born digest, passed through unchanged when the
+  // record carries one, so an API consumer can verify the record itself
+  // without trusting this Worker. Absent on v1 records (the key serialises
+  // away), so v1 views are byte-identical to before.
+  digest: unknown;
   orphan: boolean;
   // Per-witness staleness from witnessFreshness(): record-position distance
   // between the witness's causal past and the applied frontier. A number on
@@ -647,6 +695,7 @@ function buildRecordsView(
       parents: rec.parents ?? [],
       effects: rec.effects ?? {},
       reason: rec.reason,
+      digest: rec.digest,
       orphan: orphanSet.has(id),
       recordsBehind: Object.prototype.hasOwnProperty.call(freshness, id)
         ? freshness[id]

@@ -8,6 +8,9 @@ and hand-built edge cases (cycles, duplicate ids, unknown kinds, bool/int value
 collisions, unicode/non-BMP ids, non-JS-safe integers, checkpoint forgery).
 A separate FRONTIER family (set-form checkpoints, docs/FRONTIER-CHECKPOINTS.md)
 is compared and counted apart so the classic totals stay literally unchanged;
+a FORMAT-V2 family (records born with digests, docs/FORMAT-V2.md) is counted
+apart the same way, and additionally sweeps the whole corpus for the
+born-ignored-by-fold law and root-assembly equivalence;
 every case in both families also has its auto-frontier checkpoint checked
 (delta == full derive, covered set == applied set, cross-port identical),
 plus tail-dup scenarios over that checkpoint: a tail record identical to a
@@ -25,10 +28,12 @@ Exit code 0 iff all cases agree exactly (derive outputs compared with
 Python ==; verify_checkpoint booleans compared exactly) and every property
 check passes.
 """
+import hashlib
 import importlib.util
 import itertools
 import json
 import random
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -568,6 +573,221 @@ FRONTIER_EXPECTED = {
     "frontier-live-scale": "VERIFIED",
 }
 
+# --- FORMAT V2: records born with digests (docs/FORMAT-V2.md) --------------
+# A record may carry a sibling `digest` field: "sha256:" + the checkpoint-v2
+# record leaf of its content, written at birth by the runner. The field is a
+# claim ABOUT the record, never an input to it: THE FOLD NEVER READS
+# `digest`, so derivation, verdicts, and roots are functions of the five
+# content fields alone. These cases form a SEPARATE family (like FRONTIER)
+# so the classic totals stay literally unchanged; main() additionally runs
+# the family-2 and family-8 sweeps over the WHOLE corpus (every classic and
+# frontier case), and the worker-level pins (warning shape, the §3.3 dup
+# table, degrade-and-warn) live in tests/format-v2.mjs.
+
+FORMAT_V2_CASES = []
+
+
+def _fmt(name, records, probes=()):
+    FORMAT_V2_CASES.append({"name": name,
+                            "records": [dict(r) for r in records],
+                            "probes": list(probes)})
+
+
+def _born(records):
+    """Copies carrying CORRECT born digests, computed by the referee leaf —
+    the same function the runner's writer uses (the dialect is inherited)."""
+    out = []
+    for r in records:
+        r = dict(r)
+        r["digest"] = "sha256:" + ref._record_leaf(r)
+        out.append(r)
+    return out
+
+
+def _born_some(records, ids):
+    """Copies where only the named records carry (correct) born digests."""
+    out = []
+    for r in records:
+        r = dict(r)
+        if r["id"] in ids:
+            r["digest"] = "sha256:" + ref._record_leaf(r)
+        out.append(r)
+    return out
+
+
+def _v2(records, mode, seed=0):
+    """Copies carrying digests of a chosen untrustworthiness."""
+    rng_v = random.Random(seed)
+    out = []
+    for r in records:
+        r = dict(r)
+        if mode == "garbage":        # well-formed hex, wrong for everything
+            r["digest"] = "sha256:" + "0" * 64
+        elif mode == "random-wrong":  # well-formed, wrong per record
+            r["digest"] = "sha256:" + "".join(
+                rng_v.choice("0123456789abcdef") for _ in range(64))
+        elif mode == "malformed":     # not claims at all
+            r["digest"] = rng_v.choice(["garbage", "", "sha256:xyz", 42, None])
+        out.append(r)
+    return out
+
+
+_WELL_FORMED = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _assembled_root(records, at):
+    """Test-only oracle for the design's root assembly: the closure root
+    computed taking each record's leaf from its BORN DIGEST where one is
+    present and well-formed, recomputing otherwise. Production verify never
+    does this — it always recomputes. The sweep in main() proves assembly
+    and recompute agree wherever the digests are honest, and disagree
+    observably where one lies, which is what makes the recompute-only law
+    safe to keep."""
+    idx = ref._index([ref._canonical_record(r) for r in records])
+    if at not in idx:
+        return None
+    parents = {rid: ref._parents(idx[rid]) for rid in idx}
+    closure = ref._closure_ids(at, idx, parents)
+    if closure is None:
+        return None
+    lines = []
+    for rid in sorted(closure):
+        d = idx[rid].get("digest")
+        leaf = (d[len("sha256:"):]
+                if isinstance(d, str) and _WELL_FORMED.match(d)
+                else ref._record_leaf(idx[rid]))
+        lines.append(f"{rid}:{leaf}")
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
+# Family 2 (born-ignored-by-fold), cross-port spot entries — the exhaustive
+# sweep over the whole corpus is in main(). Twins included: duplicate-id
+# resolution must follow content alone, with digests attached.
+_fmt("fmt-ignored-garbage-poc", _v2(poc, "garbage"))
+_fmt("fmt-ignored-random-poc", _v2(poc, "random-wrong", seed=7))
+_fmt("fmt-ignored-malformed-base", _v2(base, "malformed", seed=3))
+_fmt("fmt-ignored-garbage-scale", _v2(_LIVE["poc-scale-1"], "garbage"))
+_dupdiff = [R("a", [], "task", {"k": "first", "shared": 1}),
+            R("a", [], "task", {"k": "second", "shared": 2}),
+            R("b", ["a"], "task", {"k": "b"})]
+_fmt("fmt-ignored-twins-garbage", _v2(_dupdiff, "garbage"))
+
+# Family 1 (born-correct): honest v2 probes over born sets — the state and
+# root of the five content fields, reached identically through v2 records.
+_poc_born = _born(poc)
+_fmt("fmt-born-correct-poc", _poc_born,
+     [{"at": "task-c", "state": closure_state(poc, "task-c"),
+       "closureRoot": ref.checkpoint_root(_poc_born, "task-c")}])
+_floats = [R("g", [], "task", {"tiny": 1e-5, "tinier": 2.5e-7, "negzero": -0.0}),
+           R("a", ["g"], "task", {"frac": 1.5}),
+           R("c", ["a"], "witness", {"sci": 1e-100})]
+_fmt("fmt-born-correct-floats", _born(_floats),
+     [{"at": "c", "state": closure_state(_floats, "c"),
+       "closureRoot": ref.checkpoint_root(_born(_floats), "c")}])
+_fmt("fmt-born-correct-twins", _born(_dupdiff))
+_dupnum = [R("a", [], "task", {"k": 10}), R("a", [], "task", {"k": 9}),
+           R("b", ["a"], "task", {"j": 1})]
+_fmt("fmt-born-correct-twins-numeric", _born(_dupnum))
+# The frozen live project, born: the pinned poc-quilt-1@task-c root must
+# not move (family 8's headline pin, at the verify surface).
+_fmt("fmt-born-live-quilt", _born(_LIVE["poc-quilt-1"]),
+     [{"at": "task-c", "state": closure_state(_LIVE["poc-quilt-1"], "task-c"),
+       "closureRoot": POC_QUILT1_TASK_C_ROOT}])
+
+# Family 3 (born-stale): born correct, then content edited without
+# recompute. The checkpoint was pinned over the ORIGINAL set; against the
+# edited set it must answer exactly as it answers the stripped edited set —
+# the digest changes no verdict, because no verdict reads it.
+_stale0 = [R("g", [], "task", {"k": 1}),
+           R("a", ["g"], "task", {"k": 1}),
+           R("c", ["a"], "witness", {})]
+_stale_root = ref.checkpoint_root(_born(_stale0), "c")
+_stale_state = closure_state(_stale0, "c")
+_stale_dom = _born(_stale0)
+_stale_dom[0] = dict(_stale_dom[0], effects={"k": 7})  # fold-invisible edit
+_fmt("fmt-born-stale-dominated", _stale_dom,
+     [{"at": "c", "state": _stale_state, "closureRoot": _stale_root}])
+_stale_vis = _born(_stale0)
+_stale_vis[1] = dict(_stale_vis[1], effects={"k": 9})  # state-visible edit
+_fmt("fmt-born-stale-state", _stale_vis,
+     [{"at": "c", "state": _stale_state, "closureRoot": _stale_root}])
+
+# Family 4 (born-forged) at the fold level — fmt-dup-copied-digest: record
+# x carries a digest copied from record a over different content. Verify
+# recomputes, so the honest checkpoint still verifies VERIFIED and the
+# root equals the stripped set's; the forgery is caught by the assembly
+# oracle in main(), whose assembled root diverges observably.
+_forge = [R("g", [], "task", {"k": 1}),
+          R("a", ["g"], "task", {"k": 2}),
+          R("x", ["g"], "task", {"k": 3})]
+_forge_born = _born(_forge)
+_forged = [dict(r, digest=_forge_born[1]["digest"]) if r["id"] == "x" else r
+           for r in _forge_born]
+_fmt("fmt-dup-copied-digest", _forged,
+     [{"at": "x", "state": closure_state(_forge, "x"),
+       "closureRoot": ref.checkpoint_root(_forged, "x")}])
+
+# Family 5 (mixed v1+v2 closures, both parent directions): a checkpoint
+# taken when only part of the set is v2 verifies VERIFIED, and its root is
+# the root of the all-v1 and all-v2 writings too (pinned in main()).
+_mix_chain = [R("g", [], "task", {"k": 1}),
+              R("p", ["g"], "task", {"k": 2}),
+              R("c", ["p"], "task", {"k": 3}),
+              R("gc", ["c"], "task", {"k": 4})]
+_mix_state = closure_state(_mix_chain, "gc")
+_mix_a = _born_some(_mix_chain, {"g", "p"})       # v2 ancestors, v1 below
+_fmt("fmt-mixed-v2-ancestors", _mix_a,
+     [{"at": "gc", "state": _mix_state,
+       "closureRoot": ref.checkpoint_root(_mix_a, "gc")}])
+_mix_b = _born_some(_mix_chain, {"c", "gc"})      # v1 parent, v2 below
+_fmt("fmt-mixed-v2-descendants", _mix_b,
+     [{"at": "gc", "state": _mix_state,
+       "closureRoot": ref.checkpoint_root(_mix_b, "gc")}])
+_mix_c = _born_some(_mix_chain, {"g", "c"})       # alternating generations
+_fmt("fmt-mixed-alternating", _mix_c,
+     [{"at": "gc", "state": _mix_state,
+       "closureRoot": ref.checkpoint_root(_mix_c, "gc")}])
+
+# Family 7 (twin-naming): two records share an id, each carrying its OWN
+# correct digest. Names follow contents — the root and the derivation are
+# the set's, whichever twin the canonical index keeps — and exchanging the
+# twins' digests (both claims now wrong) moves nothing.
+_twinK = R("twin", [], "task", {"k": "K"})
+_twinL = R("twin", [], "task", {"k": "L"})
+_twinKid = R("kid", ["twin"], "task", {"j": 1})
+_twins_born = _born([_twinK, _twinL, _twinKid])
+_fmt("fmt-twin-naming", _twins_born,
+     [{"at": "kid",
+       "state": closure_state([_twinK, _twinL, _twinKid], "kid"),
+       "closureRoot": ref.checkpoint_root(_twins_born, "kid")}])
+_fmt("fmt-twin-naming-swapped",
+     [dict(_twins_born[0], digest=_twins_born[1]["digest"]),
+      dict(_twins_born[1], digest=_twins_born[0]["digest"]),
+      _twins_born[2]])
+
+# Frontier checkpoints over born records: the array form is as indifferent
+# to the field as everything else.
+_F_born = _born(_F)
+_fmt("fmt-frontier-born", _F_born, [dict(_F_PROBE)])
+
+# Explicit verdict pins for the semantic format-v2 cases (the harness
+# otherwise only proves the two ports AGREE; these pin WHICH answer is
+# correct, and that the stripped writing of the same content answers the
+# same). Checked in main() against the referee.
+FORMAT_V2_EXPECTED = {
+    "fmt-born-correct-poc": "VERIFIED",
+    "fmt-born-correct-floats": "VERIFIED",
+    "fmt-born-live-quilt": "VERIFIED",
+    "fmt-born-stale-dominated": "STATE-ONLY",
+    "fmt-born-stale-state": "MISMATCH",
+    "fmt-dup-copied-digest": "VERIFIED",
+    "fmt-mixed-v2-ancestors": "VERIFIED",
+    "fmt-mixed-v2-descendants": "VERIFIED",
+    "fmt-mixed-alternating": "VERIFIED",
+    "fmt-twin-naming": "VERIFIED",
+    "fmt-frontier-born": "VERIFIED",
+}
+
 
 def _ancestors(start, parents, restrict=None):
     """Full ancestor set of `start` (optionally restricted to `restrict`)."""
@@ -705,7 +925,8 @@ def main():
     # kills the whole TS runner batch at JSON.parse. Fail loudly at
     # construction instead — non-finite numbers are out of the record domain
     # (see DESIGN.md §6).
-    cases_path.write_text(json.dumps(CASES + FRONTIER_CASES, allow_nan=False))
+    cases_path.write_text(json.dumps(
+        CASES + FRONTIER_CASES + FORMAT_V2_CASES, allow_nan=False))
     print(f"harness: {len(CASES)} cases, "
           f"{sum(len(c['probes']) for c in CASES)} checkpoint probes "
           f"+ {len(FRONTIER_CASES)} frontier cases, "
@@ -836,10 +1057,122 @@ def main():
             divergences.append(
                 (name, "tail-dup scenarios differ across ports"))
 
+    fmt = {"ignored": 0, "verdicts": 0, "assembled": 0, "flipped": 0,
+           "frontier_deltas": 0}
+
+    def check_fmt_case(case):
+        # The full cross-port battery (the same assertions as check_case,
+        # counted on the FORMAT-V2 line only), PLUS the format-v2 law: the
+        # STRIPPED writing of the same content — every digest removed —
+        # derives, verifies, freshens, and roots identically in the
+        # referee. The fold's outputs are a function of the five content
+        # fields alone.
+        name = case["name"]
+        recs = [dict(r) for r in case["records"]]
+        stripped = [{k: v for k, v in r.items() if k != "digest"}
+                    for r in recs]
+        exp_derive = derive(recs)
+        got = ts_results.get(name)
+        if got is None:
+            divergences.append((name, "missing from TS results"))
+            return
+        if got["derive"] != exp_derive:
+            divergences.append((name, "derive differs"))
+        if exp_derive != derive(stripped):
+            divergences.append(
+                (name, "derive(digest-carrying) != derive(stripped)"))
+        exp_verify = [
+            verify(recs, {k: p[k] for k in ("at", "state", "closureRoot")
+                          if k in p})
+            for p in case["probes"]
+        ]
+        if got["verify"] != exp_verify:
+            divergences.append(
+                (name, f"verify differs: py={exp_verify} ts={got['verify']}"))
+        exp_verify_stripped = [
+            verify(stripped, {k: p[k] for k in ("at", "state", "closureRoot")
+                              if k in p})
+            for p in case["probes"]
+        ]
+        if exp_verify != exp_verify_stripped:
+            divergences.append(
+                (name, "verify verdicts moved by the digest field"))
+        exp_fresh = ref.witness_freshness(recs)
+        if got.get("freshness") != exp_fresh:
+            divergences.append((name, "freshness differs across ports"))
+        if exp_fresh != ref.witness_freshness(stripped):
+            divergences.append(
+                (name, "freshness moved by the digest field"))
+        exp_roots = {rid: ref.checkpoint_root(recs, rid)
+                     for rid in exp_derive["order"]}
+        if got.get("roots") != exp_roots:
+            divergences.append((name, "closure-root digests differ"))
+        if exp_roots != {rid: ref.checkpoint_root(stripped, rid)
+                         for rid in exp_derive["order"]}:
+            divergences.append((name, "closure roots moved by digests"))
+        # Delta derivation at every legal checkpoint position, as in
+        # check_case — mixed v1+v2 closures and tails included.
+        exp_deltas = {}
+        for rid in exp_derive["order"]:
+            cp = ref.build_checkpoint(recs, rid)
+            if cp is None:
+                exp_deltas[rid] = None
+                continue
+            closure_ids = {r["id"] for r in cp["closure"]}
+            tail = [dict(r) for r in recs if r.get("id") not in closure_ids]
+            d = ref.derive_delta(cp, tail)
+            exp_deltas[rid] = d
+            if d != exp_derive:
+                divergences.append((name, f"delta@{rid} != full derive"))
+        if got.get("deltas") != exp_deltas:
+            divergences.append((name, "delta derivation differs across ports"))
+        # Auto-frontier checkpoint + tail-dup scenarios, as in check_case.
+        fcp = ref.build_frontier_checkpoint(recs)
+        got_f = got.get("frontier")
+        if fcp is None:
+            if got_f is not None:
+                divergences.append(
+                    (name, "frontier checkpoint: TS built one, referee none"))
+            return
+        if got_f is None:
+            divergences.append(
+                (name, "frontier checkpoint: referee built one, TS none"))
+            return
+        fmt["frontier_deltas"] += 1
+        if {r["id"] for r in fcp["closure"]} != set(exp_derive["order"]):
+            divergences.append((name, "frontier covered set != applied set"))
+        fclosure_ids = {r["id"] for r in fcp["closure"]}
+        ftail = [dict(r) for r in recs if r.get("id") not in fclosure_ids]
+        exp_fd = ref.derive_delta(fcp, ftail)
+        if exp_fd != exp_derive:
+            divergences.append((name, "frontier delta != full derive"))
+        if (got_f.get("at") != fcp["at"]
+                or got_f.get("closureRoot") != fcp["closureRoot"]
+                or got_f.get("covered") != len(fcp["closure"])
+                or got_f.get("delta") != exp_fd):
+            divergences.append(
+                (name, "frontier checkpoint differs across ports"))
+        _covered0 = fcp["closure"][0]
+        _dup = json.loads(json.dumps(_covered0))
+        _div = json.loads(json.dumps(_covered0))
+        _div["effects"] = {"__taildup__": "divergent"}
+        exp_td = {"dup": ref.derive_delta(fcp, ftail + [_dup]),
+                  "div": ref.derive_delta(fcp, ftail + [_div])}
+        if exp_td["dup"] != exp_derive:
+            divergences.append(
+                (name, "tail-dup: identical duplicate != full derive"))
+        if exp_td["div"] is not None:
+            divergences.append(
+                (name, "tail-dup: divergent copy engaged — must be None"))
+        if got.get("taildup") != exp_td:
+            divergences.append((name, "tail-dup scenarios differ across ports"))
+
     for case in CASES:
         check_case(case)
     for case in FRONTIER_CASES:
         check_case(case)
+    for case in FORMAT_V2_CASES:
+        check_fmt_case(case)
 
     total_probes = sum(len(c["probes"]) for c in CASES)
     total_witnesses = sum(
@@ -940,6 +1273,99 @@ def main():
                 assert ref.checkpoint_root([dict(r) for r in _recs], [_rid]) == \
                     ref.checkpoint_root([dict(r) for r in _recs], _rid), \
                     f"one-member root != singleton root in {_c['name']}@{_rid}"
+        # FORMAT V2 verdict pins: the referee gives the PINNED answer for
+        # each semantic format-v2 case.
+        _fmt_by_name = {c["name"]: c for c in FORMAT_V2_CASES}
+        for _nm, _want in FORMAT_V2_EXPECTED.items():
+            _c = _fmt_by_name[_nm]
+            _got = verify([dict(r) for r in _c["records"]],
+                          {k: _c["probes"][0][k]
+                           for k in ("at", "state", "closureRoot")
+                           if k in _c["probes"][0]})
+            assert _got == _want, \
+                f"{_nm}: expected {_want}, referee gave {_got}"
+        # FORMAT V2 root pins. (a) The frozen poc-quilt-1@task-c root,
+        # assembled from born digests, is the pinned literal — the root is
+        # a function of content alone, however the leaves are sourced.
+        assert _assembled_root(
+            _born([dict(r) for r in _LIVE["poc-quilt-1"]]),
+            "task-c") == POC_QUILT1_TASK_C_ROOT, \
+            "assembled poc-quilt-1@task-c root != pinned literal"
+        # (b) Mixed closures root identically in all three writings.
+        assert ref.checkpoint_root(_mix_a, "gc") == \
+            ref.checkpoint_root(_mix_chain, "gc") == \
+            ref.checkpoint_root(_born(_mix_chain), "gc"), \
+            "mixed-closure root differs across v1/v2 writings"
+        # (c) Twin-naming: the root follows the content the canonical
+        # index keeps (L — its stripped serialisation sorts after K's),
+        # never the digest either twin carries.
+        assert ref.checkpoint_root(_twins_born, "kid") == \
+            ref.checkpoint_root([_twinL, _twinKid], "kid"), \
+            "twin-naming: root does not follow the content winner"
+        assert ref.checkpoint_root(_twins_born, "kid") != \
+            ref.checkpoint_root([_twinK, _twinKid], "kid"), \
+            "twin-naming: root cannot distinguish the twins"
+        # (d) The copied digest, caught by assembly: over the forged set
+        # the assembled root diverges from the recomputed root — the fast
+        # path can tell a claim was taken on trust, which is exactly why
+        # the shipped verify path never takes one.
+        _forged_recs = [dict(r) for r in _fmt_by_name["fmt-dup-copied-digest"]["records"]]
+        assert _assembled_root(_forged_recs, "x") != \
+            ref.checkpoint_root(_forged_recs, "x"), \
+            "fmt-dup-copied-digest: assembled root must diverge from recomputed"
+        assert _assembled_root(_forged_recs, "x") is not None
+        # FORMAT V2 corpus sweeps, over EVERY classic and frontier case.
+        for _c in CASES + FRONTIER_CASES:
+            _recs = [dict(r) for r in _c["records"]]
+            _want_d = derive(_recs)
+            _want_f = ref.witness_freshness(_recs)
+            # (i) born-ignored-by-fold: garbage digests — uniform and
+            # per-record random — leave derive + freshness byte-identical.
+            for _mode, _seed in (("garbage", 0), ("random-wrong", 11)):
+                _v = _v2(_recs, _mode, seed=_seed)
+                assert derive(_v) == _want_d, \
+                    f"fmt sweep: derive moved under {_mode} digests in {_c['name']}"
+                assert ref.witness_freshness(_v) == _want_f, \
+                    f"fmt sweep: freshness moved under {_mode} digests in {_c['name']}"
+                fmt["ignored"] += 1
+            _born_c = _born(_recs)
+            # (ii) born-correct verdict invariance across the whole probe
+            # corpus: attaching correct digests moves no verdict.
+            for _p in _c["probes"]:
+                _probe = {k: _p[k] for k in ("at", "state", "closureRoot")
+                          if k in _p}
+                assert verify(_born_c, _probe) == verify(_recs, _probe), \
+                    f"fmt sweep: verdict moved under born digests in {_c['name']}"
+                fmt["verdicts"] += 1
+            # (iii) root assembly: assembled from born digests ==
+            # recomputed, at every applied id of every case.
+            for _rid in _want_d["order"]:
+                assert _assembled_root(_born_c, _rid) == \
+                    ref.checkpoint_root(_recs, _rid), \
+                    f"fmt sweep: assembled != recomputed in {_c['name']}@{_rid}"
+                fmt["assembled"] += 1
+            # (iv) negative sweep: flip one born digest per case (every
+            # copy of one covered id) -> the assembled root breaks, while
+            # the recomputed root — the only one verify trusts — is
+            # unmoved by construction (it never read the field).
+            if _want_d["order"]:
+                _rid = _want_d["order"][0]
+                _idx = ref._index([ref._canonical_record(r) for r in _recs])
+                _parents = {i: ref._parents(_idx[i]) for i in _idx}
+                _closure = ref._closure_ids(_rid, _idx, _parents) or []
+                _target = sorted(_closure)[0] if _closure else None
+                if _target is not None:
+                    _flip = [dict(r) for r in _born_c]
+                    for _r in _flip:
+                        if _r["id"] == _target:
+                            _d = _r["digest"]
+                            _r["digest"] = (_d[:7]
+                                            + ("0" if _d[7] != "0" else "1")
+                                            + _d[8:])
+                    assert _assembled_root(_flip, _rid) != \
+                        ref.checkpoint_root(_recs, _rid), \
+                        f"fmt sweep: flipped digest did not break assembly in {_c['name']}@{_rid}"
+                    fmt["flipped"] += 1
     except AssertionError as e:
         print(f"\nPROPERTY FAILURE: {e}")
         return 1
@@ -958,6 +1384,16 @@ def main():
           f"{frontier_deltas} frontier delta-vs-full derivations over the "
           f"whole corpus); poc-scale-1 frontier root "
           f"{POC_SCALE1_FRONTIER_ROOT[:12]}… — all pass")
+    print(f"FORMAT-V2: {len(FORMAT_V2_CASES)}/{len(FORMAT_V2_CASES)} cases "
+          f"identical (derive + verify + freshness + roots + deltas, both "
+          f"ports, and identical to the stripped writings); born-ignored "
+          f"sweep {fmt['ignored']} corpus derivations byte-identical; "
+          f"{fmt['verdicts']} verdicts unmoved by born digests; root "
+          f"assembly {fmt['assembled']} assembled == recomputed, "
+          f"{fmt['flipped']} flipped digests break assembly; "
+          f"fmt-dup-copied-digest caught by assembly, VERIFIED by "
+          f"recompute; poc-quilt-1@task-c root {POC_QUILT1_TASK_C_ROOT[:12]}… "
+          f"unmoved — all pass")
     return 0
 
 
