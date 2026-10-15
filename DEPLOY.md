@@ -91,13 +91,12 @@ routes exist; the deployment below uses the first.
    scoped to the account you are deploying to, with account-level
    **Workers Scripts: Edit**, **Workers KV Storage: Edit**, and
    **Queues: Edit**. Send it on every call as the header
-   `Authorization: Bearer <token>`. The commands below are written
-   with this project's `cf_api.py` helper (`cf_api.py VERB
-   /client/v4/...`), which attaches the stored credential for you;
-   with `curl`, expand each one to the same path under
-   `https://api.cloudflare.com/client/v4` with the header
-   `-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"` and the same
-   body.
+   `Authorization: Bearer <token>`. The commands below are plain
+   `curl` against `https://api.cloudflare.com/client/v4` with the
+   header `-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"`.
+   (This project's fleet also drives the same calls through a
+   `cf_api.py` shorthand that attaches a stored credential; it is
+   not a public tool, and nothing below depends on it.)
 2. **wrangler.** `wrangler login` (OAuth in a browser) or the
    `CLOUDFLARE_API_TOKEN` environment variable. Only the appendix
    path needs it.
@@ -107,8 +106,10 @@ Two things that bite:
 - **The account id is a variable, not a constant.** Every path below
   contains `$CF_ACCOUNT_ID` — set it to your own account's id, found
   in the dashboard (Workers & Pages → Overview, "Account ID" in the
-  right-hand sidebar), via `cf_api.py GET /client/v4/accounts` (the
-  `id` field of your account), or via `wrangler whoami`.
+  right-hand sidebar), via `curl -s
+  https://api.cloudflare.com/client/v4/accounts -H "Authorization:
+  Bearer $CLOUDFLARE_API_TOKEN"` (the `id` field of your account),
+  or via `wrangler whoami`.
 - **No credentials at all does not say "unauthorized" — it says
   9106/9107.** An unauthenticated API call returns errors
   `9106 Missing X-Auth-Email header` and
@@ -125,7 +126,11 @@ bundle.
 1. Bundle:
    `bun build src/worker.ts --outfile dist/worker.js --format=esm --target=browser`
 2. Create the KV namespace the event mirror lives in:
-   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces '{"title":"GITPP_EVENTS"}'`
+   ```sh
+   curl -s -X POST https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+     -d '{"title":"GITPP_EVENTS"}'
+   ```
    Take `result.id` from the response — it is `<kv-id>` in step 3 and
    the `id` in `wrangler.toml`'s `[[kv_namespaces]]` block.
 3. Multipart-upload the script with **all bindings declared in the
@@ -140,10 +145,20 @@ bundle.
    ```json
    {"files":{"metadata":{"path":"deploy/metadata.json","ctype":"application/json"},"worker.js":{"path":"dist/worker.js","ctype":"application/javascript+module","filename":"worker.js"}}}
    ```
-   then upload:
-   `cf_api.py PUTM /client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp deploy/spec.json`
+   then upload (the `deploy/spec.json` above is the same multipart
+   body in file form, for operators driving it with a helper):
+   ```sh
+   curl -s -X PUT https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+     -F "metadata=@deploy/metadata.json;type=application/json" \
+     -F "worker.js=@dist/worker.js;type=application/javascript+module"
+   ```
 4. Enable workers.dev:
-   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp/subdomain '{"enabled":true}'`
+   ```sh
+   curl -s -X POST https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp/subdomain \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+     -d '{"enabled":true}'
+   ```
 5. Set the secret LAST, and re-set it after any later re-upload. The
    payload is a **single JSON object** — the array form `[{...}]` is
    rejected by this endpoint (learned on the production deploy).
@@ -152,13 +167,27 @@ bundle.
    ```json
    {"name":"ADMIN_KEY","text":"<value>","type":"secret_text"}
    ```
-   `cf_api.py PUT /client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp/secrets @secret.json`
+   ```sh
+   curl -s -X PUT https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp/secrets \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+     --data @secret.json
+   ```
 6. Events — create the queue, register this Worker as its consumer,
    then subscribe:
-   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/queues '{"name":"gitpp-events"}'`
+   ```sh
+   curl -s -X POST https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/queues \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+     -d '{"name":"gitpp-events"}'
+   ```
    → take `result.queue_id` as `<queue-id>`.
-   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/queues/<queue-id>/consumers '{"type":"worker","script_name":"gitpp"}'`
-   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/event_subscriptions/subscriptions '<body>'`
+   ```sh
+   curl -s -X POST https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/queues/<queue-id>/consumers \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+     -d '{"type":"worker","script_name":"gitpp"}'
+   curl -s -X POST https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/event_subscriptions/subscriptions \
+     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" \
+     -d '<body>'
+   ```
    with body (one subscription per repo whose pushes you want
    mirrored):
    ```json
