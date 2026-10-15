@@ -106,6 +106,15 @@ live inside the tool the agent already runs, and the fold is unchanged.
   doctrine as the secret refusal); the error points at `--kind witness` for
   recording an observation instead. Only `task` is refused here — witness
   discipline is the warning's job below, and `override` is unaffected.
+- **An override must be grounded in its ancestry.** An `override` is a
+  *ruling*, not an invention: it may only change keys that some record in its
+  ancestor closure (everything reachable from its `--parents`, parents
+  included) already set or observed. An override ruling on a key its lineage
+  never touched — the cold-agent failure of drafting `config.timeout: 50`
+  from a bare disk observation — is refused before any push. The error names
+  the ungrounded key(s); the fix is to descend from a record that set or
+  observed the key, or to record a `--kind witness` first and let the human
+  rule. Only `override` is checked: tasks originate keys, witnesses report.
 - **Witnesses are taught, not blocked.** A `witness` whose effect keys are not
   observations (the convention is `env.*`, `obs.*`, `metric.*`, …) gets a loud
   stderr warning but still pushes — a witness reporting real measured state is
