@@ -173,6 +173,145 @@ def _rank(rec):
     return CLASS_RANK.get(rec.get("kind"), _FALLBACK_RANK)
 
 
+# --------------------------------------------------------------------------
+# SPIKE (retraction-spike branch — NOT merged semantics): dispute +
+# settlement records. Two new kinds that let the record say "wrong" as a
+# first-class, fold-visible fact, per the design duel's winning spine
+# (research/deep/retraction-design-duel.md §5) and the Grid convergence
+# (an open dispute and an open proposal are the same shape: fold-visible,
+# fold-inert until a settling record closes it).
+#
+#   dispute    {target, reason (mandatory), author?} — claims the target's
+#              effects should not stand. While OPEN (unsettled, settled
+#              "rejected", settled by nobody with authority, or malformed)
+#              it changes NOTHING in derivation.
+#   settlement {dispute, resolution: "upheld"|"rejected", author?} — the
+#              settling record. It bites only if AUTHORITATIVE: its author
+#              is the target record's author (the author is the authority
+#              on their own intent — self-disavowal and author rebuttal)
+#              or a captain-class author (has authored an applied override
+#              in this set — the spike's set-internal operationalisation of
+#              the duel's "captain-only" settlement). Anonymous settlements
+#              never bite.
+#
+# An upheld dispute RETRACTS its target: the target's effects are voided
+# and derivation re-runs, but the target keeps its graph position — it is
+# NOT removed from the set, so its descendants are not orphaned and not
+# auto-disputed; their ancestry still runs through it. A retracted record
+# lends no cleanliness: in descendants' tallies it counts as NEITHER an
+# intent nor a witness ancestor (the bounded stain — floor "counts as
+# nothing"; stacking penalties were considered and not taken).
+#
+# Meta records (dispute/settlement) are never derivation steps: they are
+# excluded from `order`, from candidacy (any `effects` on them are void),
+# and from ancestry tallies, but they remain in the parents graph for
+# orphan/cycle analysis and for ancestry transitivity.
+#
+# Disputes may target meta records too: settled upheld, they VOID the
+# targeted dispute/settlement (a voided settlement never ruled; a voided
+# dispute never bites). Voiding is evaluated on the dispute-dependency
+# graph; a dispute that sits in, or depends on, a voiding cycle has no
+# well-founded settlement basis and is inert (doubt -> no bite).
+# --------------------------------------------------------------------------
+
+_META_KINDS = ("dispute", "settlement")
+
+
+def _author(rec):
+    """A record's author, if it carries a non-empty string one. Records in
+    the shipped sets carry no author at all; absence means unattributed."""
+    a = rec.get("author")
+    return a if isinstance(a, str) and a != "" else None
+
+
+def _settlement_pass(idx, orphan):
+    """First pass of the fold: compute, from the record set alone, which
+    records are retracted and the status of every dispute.
+
+    Returns (retracted, statuses): `retracted` is a set of non-meta record
+    ids whose effects are voided; `statuses` maps EVERY dispute id in idx
+    to "open" | "upheld" | "rejected" | "inert" (malformed, orphaned,
+    voided, or cycle-entangled disputes are "inert")."""
+    kind = {rid: idx[rid].get("kind") for rid in idx}
+    author = {rid: _author(idx[rid]) for rid in idx}
+    captains = {author[r] for r in idx
+                if kind[r] == "override" and r not in orphan and author[r]}
+
+    # Well-formed disputes: target names a record in the set, reason is a
+    # non-empty string. A dispute that never landed (orphan) is inert.
+    target_of = {}
+    for rid in idx:
+        if kind[rid] != "dispute":
+            continue
+        tgt, reason = idx[rid].get("target"), idx[rid].get("reason")
+        if isinstance(tgt, str) and tgt in idx \
+                and isinstance(reason, str) and reason != "":
+            target_of[rid] = tgt
+    live = {d for d in target_of if d not in orphan}
+
+    # Candidate settlements per dispute: well-formed (names a live-able
+    # dispute, resolution in domain), landed (not orphan), attributed, and
+    # authoritative for that dispute.
+    settlements_on = {}
+    for rid in idx:
+        if kind[rid] != "settlement" or rid in orphan or author[rid] is None:
+            continue
+        d = idx[rid].get("dispute")
+        if not (isinstance(d, str) and d in target_of):
+            continue
+        if idx[rid].get("resolution") not in ("upheld", "rejected"):
+            continue
+        tgt_author = author[target_of[d]]
+        if author[rid] == tgt_author or author[rid] in captains:
+            settlements_on.setdefault(d, []).append(rid)
+
+    # Dispute-dependency graph: d depends on every dispute whose status
+    # decides whether d or one of d's candidate settlements is voided.
+    def deps(d):
+        out = set()
+        for d2 in live:
+            if target_of[d2] == d or target_of[d2] in settlements_on.get(d, ()):
+                out.add(d2)
+        return out
+
+    dep_map = {d: deps(d) for d in live}
+
+    def voided(x, status):
+        return any(target_of[d2] == x and status.get(d2) == "upheld"
+                   for d2 in live)
+
+    # Evaluate in dependency order (Kahn-style over the dependency graph).
+    # Whatever cannot be evaluated — it sits in, or depends on, a voiding
+    # cycle — has no well-founded settlement basis and stays inert.
+    status = {}
+    remaining = set(live)
+    while True:
+        ready = [d for d in sorted(remaining) if dep_map[d] <= status.keys()]
+        if not ready:
+            break
+        for d in ready:
+            if voided(d, status):
+                status[d] = "inert"          # voided dispute never bites
+            else:
+                cands = [s for s in settlements_on.get(d, ())
+                         if not voided(s, status)]
+                if not cands:
+                    status[d] = "open"
+                else:
+                    ruling = min(cands)      # smallest id rules (code point)
+                    status[d] = idx[ruling]["resolution"]
+            remaining.discard(d)
+
+    statuses = {}
+    for rid in idx:
+        if kind[rid] == "dispute":
+            statuses[rid] = status.get(rid, "inert")
+    retracted = {target_of[d] for d in live
+                 if status.get(d) == "upheld"
+                 and kind[target_of[d]] not in _META_KINDS}
+    return retracted, statuses
+
+
 def _cycle_affected(nodes, parents):
     """Nodes that cannot be topologically ordered (in, or blocked behind, a parent cycle)."""
     indeg = {r: 0 for r in nodes}
@@ -195,9 +334,38 @@ def _cycle_affected(nodes, parents):
     return set(nodes) - done
 
 
+def _orphan_set(idx, parents):
+    """Records excluded from derivation: any ancestor absent, or blocked
+    behind such a record, or in/behind a parent cycle. Computed over ALL
+    records (meta kinds included — the parents graph is kind-blind)."""
+    ids = set(idx)
+    children = {rid: [] for rid in idx}
+    for rid, ps in parents.items():
+        for p in ps:
+            if p in children:
+                children[p].append(rid)
+    orphan = set()
+    work = [rid for rid in idx if any(p not in ids for p in parents[rid])]
+    orphan.update(work)
+    head = 0
+    while head < len(work):
+        for c in children[work[head]]:
+            if c not in orphan:
+                orphan.add(c)
+                work.append(c)
+        head += 1
+    orphan |= _cycle_affected(ids - orphan, parents)
+    return orphan
+
+
 def _topological(nodes, parents):
-    """Kahn's algorithm, always taking the smallest ready id: one canonical order."""
-    indeg = {r: len(parents[r]) for r in nodes}
+    """Kahn's algorithm, always taking the smallest ready id: one canonical
+    order. Indegree counts only parents inside `nodes`, so a subgraph (e.g.
+    the derivation records, whose meta parents are not derivation steps)
+    gets its own canonical order; when every parent is inside — the only
+    shape the pre-spike fold ever passed — the count is len(parents)."""
+    nodes = set(nodes)
+    indeg = {r: sum(1 for p in parents[r] if p in nodes) for r in nodes}
     children = {r: [] for r in nodes}
     for r in nodes:
         for p in parents[r]:
@@ -221,50 +389,40 @@ def derive(records):
     idx = _index(records)
     ids = set(idx)
     parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    orphan = _orphan_set(idx, parents)
 
-    children = {rid: [] for rid in idx}
-    for rid, ps in parents.items():
-        for p in ps:
-            if p in children:
-                children[p].append(rid)
+    # SPIKE: the settlement pass runs first, over the whole landed set;
+    # meta records are consumed by it and are never derivation steps.
+    retracted, _statuses = _settlement_pass(idx, orphan)
+    meta = {rid for rid in idx if idx[rid].get("kind") in _META_KINDS}
 
-    # Orphans: a record is orphaned if any ancestor is absent, or is itself already
-    # orphaned. Propagated with a worklist (O(N+E)) rather than a repeated rescan,
-    # which is quadratic when ids happen to sort dependants before their parents.
-    orphan = set()
-    work = [rid for rid in idx if any(p not in ids for p in parents[rid])]
-    orphan.update(work)
-    head = 0
-    while head < len(work):
-        for c in children[work[head]]:
-            if c not in orphan:
-                orphan.add(c)
-                work.append(c)
-        head += 1
-    orphan |= _cycle_affected(set(ids) - orphan, parents)
-
-    applied = sorted(set(idx) - orphan)
+    applied = sorted(ids - orphan - meta)
     applied_set = set(applied)
-    order = _topological(applied, parents)
+    order = _topological(applied_set, parents)
 
-    # Full applied-ancestor set of every applied record, memoised once per call
-    # in topological order (parents precede children). anc[rid] is naturally
-    # applied-restricted: an applied record's parents are all applied, or it
-    # would itself be an orphan. Precomputing here means no ancestor walk is
-    # repeated across candidates or keys — the per-candidate re-walks were
-    # superlinear on deep contested keys (ADDENDUM #4 P5).
+    # Full ancestor set of every landed record, memoised once per call in
+    # topological order (parents precede children). Computed over the whole
+    # landed graph — meta and retracted records included — so ancestry
+    # transitivity runs through them exactly as through any record; only
+    # candidacy (below) and the cleanliness tallies treat them specially.
+    # Precomputing means no ancestor walk is repeated across candidates or
+    # keys — the per-candidate re-walks were superlinear on deep contested
+    # keys (ADDENDUM #4 P5).
     anc = {}
-    for rid in order:
+    for rid in _topological(ids - orphan, parents):
         a = set()
         for p in parents[rid]:
-            if p in applied_set:
+            if p in anc:
                 a.add(p)
                 a |= anc[p]
         anc[rid] = a
 
-    # Who sets each key, among applied records only.
+    # Who sets each key, among applied records only. A retracted record's
+    # effects are voided: it is never a candidate, never a winner or loser.
     setters = {}
     for rid in applied:
+        if rid in retracted:
+            continue
         for k in _effects(idx[rid]):
             setters.setdefault(k, set()).add(rid)
 
@@ -291,8 +449,15 @@ def derive(records):
             # records, then the lexicographically smallest id — more deeds
             # behind a value makes it cleaner; more bare observations, weaker.
             def _cleanliness(c):
-                intent = sum(1 for a in anc[c] if _rank(idx[a]) < CLASS_RANK["witness"])
-                wit = sum(1 for a in anc[c] if _rank(idx[a]) == CLASS_RANK["witness"])
+                # Meta records count as neither (they are not derivation);
+                # a retracted ancestor counts as neither either — the
+                # bounded stain: it stops lending intent weight, and is
+                # not demoted to a witness penalty (floor: counts as
+                # nothing; stacking penalties were not taken).
+                tallied = [a for a in anc[c]
+                           if a not in meta and a not in retracted]
+                intent = sum(1 for a in tallied if _rank(idx[a]) < CLASS_RANK["witness"])
+                wit = sum(1 for a in tallied if _rank(idx[a]) == CLASS_RANK["witness"])
                 return (-intent, wit, c)
 
             winner = min(maximal, key=_cleanliness)
@@ -390,3 +555,21 @@ def witness_freshness(records):
         if idx[rid].get("kind") == "witness":
             result[rid] = total - len(_ancestors_incl(rid))
     return result
+
+
+def retraction_status(records):
+    """SPIKE: the settlement pass as data — a sibling surface to
+    witness_freshness, not a change to derive()'s output shape.
+
+    Returns {"disputes": {dispute_id: status}, "retracted": [record_id]}
+    where status is one of "open" (no authoritative ruling yet),
+    "upheld"/"rejected" (the smallest-id authoritative, unvoided
+    settlement's ruling), or "inert" (malformed, orphaned, voided, or
+    cycle-entangled — the dispute cannot bite). Pure function of the
+    record set, like derive()."""
+    records = [_canonical_record(r) for r in records]
+    idx = _index(records)
+    parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    orphan = _orphan_set(idx, parents)
+    retracted, statuses = _settlement_pass(idx, orphan)
+    return {"disputes": statuses, "retracted": sorted(retracted)}

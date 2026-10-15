@@ -220,6 +220,17 @@ function rankOf(rec: FoldRecord): number {
   return FALLBACK_RANK;
 }
 
+function kindOf(rec: FoldRecord): unknown {
+  return (rec as { kind?: unknown }).kind;
+}
+
+/** A record's author, if it carries a non-empty string one. Records in the
+ * shipped sets carry no author at all; absence means unattributed. */
+function authorOf(rec: FoldRecord): string | null {
+  const a = (rec as { author?: unknown }).author;
+  return typeof a === "string" && a !== "" ? a : null;
+}
+
 /**
  * Compare two strings by Unicode CODE POINT sequence, matching Python's native
  * string ordering. JavaScript's built-in `<`/`>` and `Array.sort` compare by
@@ -343,12 +354,15 @@ function cycleAffected(nodes: Set<string>, parents: ParentsMap): Set<string> {
 }
 
 /** Kahn's algorithm, always taking the smallest ready id: one canonical
- * order. Mirrors fold.py's _topological (indegree counts all parents). */
+ * order. Mirrors fold.py's _topological (indegree counts only parents
+ * inside the node set, so a subgraph gets its own canonical order; when
+ * every parent is inside — the only shape the pre-spike fold passed —
+ * the count is parents.length). */
 function topological(nodes: Set<string>, parents: ParentsMap): string[] {
   const indeg: { [id: string]: number } = {};
   const children: { [id: string]: string[] } = {};
   for (const r of nodes) {
-    indeg[r] = parents[r].length;
+    indeg[r] = parents[r].filter((p) => nodes.has(p)).length;
     children[r] = [];
   }
   for (const r of nodes) {
@@ -373,15 +387,173 @@ function topological(nodes: Set<string>, parents: ParentsMap): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// derive / verify_checkpoint
+// SPIKE (retraction-spike branch — NOT merged semantics): dispute +
+// settlement records. Mirrors referee/fold.py's settlement pass exactly;
+// see the design block there and docs/RETRACTION-SPIKE.md. Two new kinds:
+//
+//   dispute    {target, reason (mandatory), author?} — claims the target's
+//              effects should not stand. While OPEN (unsettled, settled
+//              "rejected", settled by nobody with authority, or malformed)
+//              it changes NOTHING in derivation.
+//   settlement {dispute, resolution: "upheld"|"rejected", author?} — the
+//              settling record. It bites only if AUTHORITATIVE: its author
+//              is the target record's author, or a captain-class author
+//              (authored an applied override in this set). Anonymous
+//              settlements never bite.
+//
+// An upheld dispute RETRACTS its target: effects voided, derivation
+// re-runs, but the target keeps its graph position — descendants are not
+// orphaned and not auto-disputed, and a retracted ancestor lends no
+// cleanliness (counts as neither intent nor witness). Meta records are
+// never derivation steps: excluded from `order`, from candidacy (any
+// `effects` on them are void), and from ancestry tallies, but present in
+// the parents graph. A settled-upheld dispute targeting a meta record
+// VOIDS it; voiding cycles have no well-founded basis and are inert.
 // ---------------------------------------------------------------------------
 
-export function derive(records: FoldRecord[]): DeriveOutput {
-  const idx = indexRecords([...records]);
-  const ids = new Set<string>(Object.keys(idx));
-  const parents: ParentsMap = {};
-  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+const META_KINDS = new Set(["dispute", "settlement"]);
 
+function isMeta(rec: FoldRecord): boolean {
+  const k = kindOf(rec);
+  return typeof k === "string" && META_KINDS.has(k);
+}
+
+interface SettlementPass {
+  retracted: Set<string>;
+  statuses: { [id: string]: string };
+}
+
+/** First pass of the fold: compute, from the record set alone, which
+ * records are retracted and the status of every dispute. Mirrors
+ * fold.py's _settlement_pass. */
+function settlementPass(
+  idx: { [id: string]: FoldRecord },
+  orphan: Set<string>,
+): SettlementPass {
+  const kind: { [id: string]: unknown } = {};
+  const author: { [id: string]: string | null } = {};
+  for (const rid of Object.keys(idx)) {
+    kind[rid] = kindOf(idx[rid]);
+    author[rid] = authorOf(idx[rid]);
+  }
+  const captains = new Set<string>();
+  for (const rid of Object.keys(idx)) {
+    if (kind[rid] === "override" && !orphan.has(rid) && author[rid]) {
+      captains.add(author[rid] as string);
+    }
+  }
+
+  // Well-formed disputes: target names a record in the set, reason is a
+  // non-empty string. A dispute that never landed (orphan) is inert.
+  const targetOf: { [id: string]: string } = {};
+  for (const rid of Object.keys(idx)) {
+    if (kind[rid] !== "dispute") continue;
+    const rec = idx[rid] as { target?: unknown; reason?: unknown };
+    if (typeof rec.target === "string" &&
+        Object.prototype.hasOwnProperty.call(idx, rec.target) &&
+        typeof rec.reason === "string" && rec.reason !== "") {
+      targetOf[rid] = rec.target;
+    }
+  }
+  const live = new Set<string>(
+    Object.keys(targetOf).filter((d) => !orphan.has(d)),
+  );
+
+  // Candidate settlements per dispute: well-formed, landed, attributed,
+  // and authoritative for that dispute.
+  const settlementsOn: { [id: string]: string[] } = {};
+  for (const rid of Object.keys(idx)) {
+    if (kind[rid] !== "settlement" || orphan.has(rid) || !author[rid]) {
+      continue;
+    }
+    const rec = idx[rid] as { dispute?: unknown; resolution?: unknown };
+    const d = rec.dispute;
+    if (typeof d !== "string" ||
+        !Object.prototype.hasOwnProperty.call(targetOf, d)) {
+      continue;
+    }
+    if (rec.resolution !== "upheld" && rec.resolution !== "rejected") {
+      continue;
+    }
+    const tgtAuthor = author[targetOf[d]];
+    if (author[rid] === tgtAuthor || captains.has(author[rid] as string)) {
+      if (!settlementsOn[d]) settlementsOn[d] = [];
+      settlementsOn[d].push(rid);
+    }
+  }
+
+  // Dispute-dependency graph: d depends on every dispute whose status
+  // decides whether d or one of d's candidate settlements is voided.
+  const depMap: { [id: string]: Set<string> } = {};
+  for (const d of live) {
+    const out = new Set<string>();
+    for (const d2 of live) {
+      if (targetOf[d2] === d ||
+          (settlementsOn[d] ?? []).includes(targetOf[d2])) {
+        out.add(d2);
+      }
+    }
+    depMap[d] = out;
+  }
+
+  const isVoided = (x: string, status: { [id: string]: string }): boolean => {
+    for (const d2 of live) {
+      if (targetOf[d2] === x && status[d2] === "upheld") return true;
+    }
+    return false;
+  };
+
+  // Evaluate in dependency order (Kahn-style over the dependency graph).
+  // Whatever cannot be evaluated — it sits in, or depends on, a voiding
+  // cycle — has no well-founded settlement basis and stays inert.
+  const status: { [id: string]: string } = {};
+  const remaining = new Set<string>(live);
+  for (;;) {
+    const ready = [...remaining]
+      .filter((d) => [...depMap[d]].every(
+        (x) => Object.prototype.hasOwnProperty.call(status, x)))
+      .sort(cmpCodePoints);
+    if (ready.length === 0) break;
+    for (const d of ready) {
+      if (isVoided(d, status)) {
+        status[d] = "inert"; // voided dispute never bites
+      } else {
+        const cands = (settlementsOn[d] ?? []).filter(
+          (s) => !isVoided(s, status));
+        if (cands.length === 0) {
+          status[d] = "open";
+        } else {
+          const ruling = [...cands].sort(cmpCodePoints)[0]; // smallest id
+          status[d] = String(
+            (idx[ruling] as { resolution?: unknown }).resolution);
+        }
+      }
+      remaining.delete(d);
+    }
+  }
+
+  const statuses: { [id: string]: string } = {};
+  for (const rid of Object.keys(idx)) {
+    if (kind[rid] === "dispute") statuses[rid] = status[rid] ?? "inert";
+  }
+  const retracted = new Set<string>();
+  for (const d of live) {
+    if (status[d] === "upheld" && !META_KINDS.has(String(kind[targetOf[d]]))) {
+      retracted.add(targetOf[d]);
+    }
+  }
+  return { retracted, statuses };
+}
+
+/** Records excluded from derivation: any ancestor absent, or blocked
+ * behind such a record, or in/behind a parent cycle. Computed over ALL
+ * records (meta kinds included — the parents graph is kind-blind).
+ * Mirrors fold.py's _orphan_set; used by derive() and retractionStatus(). */
+function computeOrphans(
+  idx: { [id: string]: FoldRecord },
+  parents: ParentsMap,
+): Set<string> {
+  const ids = new Set<string>(Object.keys(idx));
   const children: { [id: string]: string[] } = {};
   for (const rid of Object.keys(idx)) children[rid] = [];
   for (const [rid, ps] of Object.entries(parents)) {
@@ -391,9 +563,6 @@ export function derive(records: FoldRecord[]): DeriveOutput {
       }
     }
   }
-
-  // Orphans: a record is orphaned if any ancestor is absent, or is itself
-  // already orphaned. Worklist propagation, as in fold.py.
   const orphan = new Set<string>();
   const work: string[] = [];
   for (const rid of Object.keys(idx)) {
@@ -413,24 +582,49 @@ export function derive(records: FoldRecord[]): DeriveOutput {
   const nonOrphan = new Set<string>();
   for (const rid of ids) if (!orphan.has(rid)) nonOrphan.add(rid);
   for (const rid of cycleAffected(nonOrphan, parents)) orphan.add(rid);
+  return orphan;
+}
+
+// ---------------------------------------------------------------------------
+// derive / verify_checkpoint
+// ---------------------------------------------------------------------------
+
+export function derive(records: FoldRecord[]): DeriveOutput {
+  const idx = indexRecords([...records]);
+  const ids = new Set<string>(Object.keys(idx));
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+
+  const orphan = computeOrphans(idx, parents);
+
+  // SPIKE: the settlement pass runs first, over the whole landed set;
+  // meta records are consumed by it and are never derivation steps.
+  const { retracted } = settlementPass(idx, orphan);
+  const meta = new Set<string>(
+    Object.keys(idx).filter((rid) => isMeta(idx[rid])));
 
   const applied: string[] = [];
-  for (const rid of ids) if (!orphan.has(rid)) applied.push(rid);
+  for (const rid of ids) {
+    if (!orphan.has(rid) && !meta.has(rid)) applied.push(rid);
+  }
   applied.sort(cmpCodePoints);
-  const appliedSet = new Set<string>(applied);
   const order = topological(new Set<string>(applied), parents);
 
-  // Full applied-ancestor set of every applied record, memoised once per call
-  // in topological order (parents precede children). anc[rid] is naturally
-  // applied-restricted: an applied record's parents are all applied, or it
-  // would itself be an orphan. Precomputing here means no ancestor walk is
-  // repeated across candidates or keys — the per-candidate re-walks were
-  // superlinear on deep contested keys (ADDENDUM #4 P5). Mirrors fold.py.
+  // Full ancestor set of every landed record, memoised once per call in
+  // topological order (parents precede children). Computed over the whole
+  // landed graph — meta and retracted records included — so ancestry
+  // transitivity runs through them exactly as through any record; only
+  // candidacy (below) and the cleanliness tallies treat them specially.
+  // Precomputing means no ancestor walk is repeated across candidates or
+  // keys — the per-candidate re-walks were superlinear on deep contested
+  // keys (ADDENDUM #4 P5). Mirrors fold.py.
   const anc: { [id: string]: Set<string> } = {};
-  for (const rid of order) {
+  const graphNodes = new Set<string>();
+  for (const rid of ids) if (!orphan.has(rid)) graphNodes.add(rid);
+  for (const rid of topological(graphNodes, parents)) {
     const a = new Set<string>();
     for (const p of parents[rid]) {
-      if (appliedSet.has(p)) {
+      if (Object.prototype.hasOwnProperty.call(anc, p)) {
         a.add(p);
         for (const x of anc[p]) a.add(x);
       }
@@ -438,9 +632,11 @@ export function derive(records: FoldRecord[]): DeriveOutput {
     anc[rid] = a;
   }
 
-  // Who sets each key, among applied records only.
+  // Who sets each key, among applied records only. A retracted record's
+  // effects are voided: it is never a candidate, never a winner or loser.
   const setters: { [key: string]: Set<string> } = {};
   for (const rid of applied) {
+    if (retracted.has(rid)) continue;
     for (const k of Object.keys(effectsOf(idx[rid]))) {
       if (!setters[k]) setters[k] = new Set<string>();
       setters[k].add(rid);
@@ -472,9 +668,14 @@ export function derive(records: FoldRecord[]): DeriveOutput {
       // records, then the smallest id. More deeds behind a value makes it
       // cleaner; more bare observations, weaker.
       const cleanliness = (c: string): [number, number, string] => {
+        // Meta records count as neither (they are not derivation); a
+        // retracted ancestor counts as neither either — the bounded
+        // stain: it stops lending intent weight, and is not demoted to
+        // a witness penalty (floor: counts as nothing).
         let intent = 0;
         let wit = 0;
         for (const a of anc[c]) {
+          if (meta.has(a) || retracted.has(a)) continue;
           const r = rankOf(idx[a]);
           if (r < WITNESS_RANK) intent += 1;
           if (r === WITNESS_RANK) wit += 1;
@@ -732,4 +933,28 @@ export function witnessFreshness(records: FoldRecord[]): { [id: string]: number 
     if (kind === "witness") result[rid] = total - ancestorsIncl(rid).size;
   }
   return result;
+}
+
+/**
+ * SPIKE: the settlement pass as data — a sibling surface to
+ * witnessFreshness, not a change to derive()'s output shape (TypeScript
+ * port of the referee's retraction_status; checked against it by the
+ * conformance harness).
+ *
+ * Returns {disputes: {disputeId: status}, retracted: [recordId]} where
+ * status is "open" (no authoritative ruling yet), "upheld"/"rejected"
+ * (the smallest-id authoritative, unvoided settlement's ruling), or
+ * "inert" (malformed, orphaned, voided, or cycle-entangled — the
+ * dispute cannot bite). Pure function of the record set, like derive().
+ */
+export function retractionStatus(records: FoldRecord[]): {
+  disputes: { [id: string]: string };
+  retracted: string[];
+} {
+  const idx = indexRecords([...records]);
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+  const orphan = computeOrphans(idx, parents);
+  const { retracted, statuses } = settlementPass(idx, orphan);
+  return { disputes: statuses, retracted: [...retracted].sort(cmpCodePoints) };
 }

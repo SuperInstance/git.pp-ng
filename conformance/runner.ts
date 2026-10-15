@@ -6,6 +6,7 @@ import {
   verifyCheckpoint,
   witnessFreshness,
   checkpointRoot,
+  retractionStatus,
   type FoldRecord,
 } from "../src/fold.ts";
 
@@ -35,6 +36,8 @@ const results = cases.map((c) => ({
     }),
   ),
   freshness: witnessFreshness(c.records),
+  // SPIKE (retraction): the settlement pass as data, compared Python-vs-TS.
+  retraction: retractionStatus(c.records),
   // checkpoint v2 digest for every applied id, compared Python-vs-TS by the
   // harness to prove the closure-root construction is identical across ports.
   roots: Object.fromEntries(
