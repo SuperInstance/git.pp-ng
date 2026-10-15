@@ -376,7 +376,17 @@ function topological(nodes: Set<string>, parents: ParentsMap): string[] {
 // derive / verify_checkpoint
 // ---------------------------------------------------------------------------
 
-export function derive(records: FoldRecord[]): DeriveOutput {
+/**
+ * LEGACY ENGINE — the pre-production fold, frozen verbatim as the
+ * differential oracle for the memoised-bitset engine (derive, below). It
+ * materialises the full applied-ancestor Set of every record, which is
+ * Θ(N × mean ancestors) in time and memory (measured: ~2.7–3.8 s and
+ * ~0.7–0.8 GB at 5,000 records — past the 128 MB Worker ceiling). Do not
+ * optimise or "fix" this copy; its byte-for-byte agreement with derive()
+ * on the conformance corpus and the differential fuzz is the new engine's
+ * correctness evidence.
+ */
+export function deriveLegacy(records: FoldRecord[]): DeriveOutput {
   const idx = indexRecords([...records]);
   const ids = new Set<string>(Object.keys(idx));
   const parents: ParentsMap = {};
@@ -487,6 +497,233 @@ export function derive(records: FoldRecord[]): DeriveOutput {
         if (ca[0] !== cb[0]) return ca[0] - cb[0];
         if (ca[1] !== cb[1]) return ca[1] - cb[1];
         return cmpCodePoints(ca[2], cb[2]);
+      })[0];
+    }
+
+    state[k] = effectsOf(idx[winner])[k];
+    const distinct = new Set<string>();
+    for (const c of cands) distinct.add(pyValueKey(effectsOf(idx[c])[k]));
+    if (distinct.size >= 2) {
+      conflicts.push({
+        key: k,
+        winner,
+        losers: cands.filter((c) => c !== winner).sort(cmpCodePoints),
+      });
+    }
+  }
+
+  const orphans = [...orphan].sort(cmpCodePoints);
+  return { state, order, conflicts, orphans };
+}
+
+// ---------------------------------------------------------------------------
+// Memoised ancestry engine (production derive).
+//
+// Same semantics as deriveLegacy — DESIGN.md is the spec, byte-for-byte —
+// with the ancestry machinery rebuilt so no per-record ancestor SET is
+// ever materialised:
+//
+// - Ancestry is one flat bitset per applied record (strict ancestors),
+//   built once per derive in topological order by OR-ing parent rows:
+//   O(N × parents × N/32) word operations, N²/8 bytes total (≈3 MB at
+//   5,000 records, vs ~0.7 GB of Set objects in the legacy engine).
+// - Dominance is exact, as in the legacy engine: candidate c is dominated
+//   iff c's bit is set in the union of the pool's ancestor rows.
+// - Tie-break counts (intent / witness ancestors) are masked popcounts
+//   over a candidate's row, computed once per record and memoised across
+//   every key and comparison — the legacy engine re-walked the ancestor
+//   set inside its sort comparator, per key.
+// ---------------------------------------------------------------------------
+
+interface PreparedDerive {
+  idx: { [id: string]: FoldRecord };
+  parents: ParentsMap;
+  applied: string[];
+  order: string[];
+  orphan: Set<string>;
+}
+
+/** The front half of the fold (canonical index, orphan propagation, cycle
+ * exclusion, canonical Kahn order) — logic identical to deriveLegacy's. */
+function prepareDerive(records: FoldRecord[]): PreparedDerive {
+  const idx = indexRecords([...records]);
+  const ids = new Set<string>(Object.keys(idx));
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+
+  const children: { [id: string]: string[] } = {};
+  for (const rid of Object.keys(idx)) children[rid] = [];
+  for (const [rid, ps] of Object.entries(parents)) {
+    for (const p of ps) {
+      if (Object.prototype.hasOwnProperty.call(children, p)) {
+        children[p].push(rid);
+      }
+    }
+  }
+
+  const orphan = new Set<string>();
+  const work: string[] = [];
+  for (const rid of Object.keys(idx)) {
+    if (parents[rid].some((p) => !ids.has(p))) work.push(rid);
+  }
+  for (const rid of work) orphan.add(rid);
+  let head = 0;
+  while (head < work.length) {
+    for (const c of children[work[head]] ?? []) {
+      if (!orphan.has(c)) {
+        orphan.add(c);
+        work.push(c);
+      }
+    }
+    head += 1;
+  }
+  const nonOrphan = new Set<string>();
+  for (const rid of ids) if (!orphan.has(rid)) nonOrphan.add(rid);
+  for (const rid of cycleAffected(nonOrphan, parents)) orphan.add(rid);
+
+  const applied: string[] = [];
+  for (const rid of ids) if (!orphan.has(rid)) applied.push(rid);
+  applied.sort(cmpCodePoints);
+  const order = topological(new Set<string>(applied), parents);
+  return { idx, parents, applied, order, orphan };
+}
+
+const POP8 = new Uint8Array(256);
+for (let i = 1; i < 256; i++) POP8[i] = POP8[i >> 1] + (i & 1);
+
+function popcount32(x: number): number {
+  return (
+    POP8[x & 0xff] +
+    POP8[(x >>> 8) & 0xff] +
+    POP8[(x >>> 16) & 0xff] +
+    POP8[x >>> 24]
+  );
+}
+
+interface AncestryIndex {
+  /** Number of applied records (rows). */
+  n: number;
+  /** Uint32 words per row. */
+  words: number;
+  /** Flat strict-ancestor bitsets: row r starts at r * words. */
+  bits: Uint32Array;
+  /** Record id -> row (its position in topological order). */
+  pos: Map<string, number>;
+  /** Bit i set iff the record at row i carries intent (rank < witness). */
+  intentMask: Uint32Array;
+  /** Bit i set iff the record at row i ranks as a witness. */
+  witnessMask: Uint32Array;
+}
+
+/** Build the ancestor bitsets over the applied records in topological
+ * order (parents precede children, so a row is the OR of its parents'
+ * rows plus the parents' own bits). An applied record's parents are all
+ * applied — otherwise it would be an orphan — so every parent resolves
+ * to a row; the undefined check mirrors the legacy appliedSet guard. */
+function buildAncestry(
+  order: string[],
+  parents: ParentsMap,
+  idx: { [id: string]: FoldRecord },
+): AncestryIndex {
+  const n = order.length;
+  const words = Math.ceil(n / 32);
+  const bits = new Uint32Array(n * words);
+  const pos = new Map<string, number>();
+  const intentMask = new Uint32Array(words);
+  const witnessMask = new Uint32Array(words);
+  for (let i = 0; i < n; i++) {
+    pos.set(order[i], i);
+    const r = rankOf(idx[order[i]]);
+    if (r < WITNESS_RANK) intentMask[i >> 5] |= 1 << (i & 31);
+    else witnessMask[i >> 5] |= 1 << (i & 31);
+  }
+  for (let i = 0; i < n; i++) {
+    const row = i * words;
+    for (const p of parents[order[i]]) {
+      const pi = pos.get(p);
+      if (pi === undefined) continue;
+      const prow = pi * words;
+      for (let w = 0; w < words; w++) bits[row + w] |= bits[prow + w];
+      bits[row + (pi >> 5)] |= 1 << (pi & 31);
+    }
+  }
+  return { n, words, bits, pos, intentMask, witnessMask };
+}
+
+function maskedPopcount(anc: AncestryIndex, row: number, mask: Uint32Array): number {
+  const off = row * anc.words;
+  let s = 0;
+  for (let w = 0; w < anc.words; w++) s += popcount32(anc.bits[off + w] & mask[w]);
+  return s;
+}
+
+function rowPopcount(anc: AncestryIndex, row: number): number {
+  const off = row * anc.words;
+  let s = 0;
+  for (let w = 0; w < anc.words; w++) s += popcount32(anc.bits[off + w]);
+  return s;
+}
+
+export function derive(records: FoldRecord[]): DeriveOutput {
+  const { idx, parents, applied, order, orphan } = prepareDerive(records);
+  const anc = buildAncestry(order, parents, idx);
+
+  // Who sets each key, among applied records only (as deriveLegacy).
+  const setters: { [key: string]: Set<string> } = {};
+  for (const rid of applied) {
+    for (const k of Object.keys(effectsOf(idx[rid]))) {
+      if (!setters[k]) setters[k] = new Set<string>();
+      setters[k].add(rid);
+    }
+  }
+
+  // Per-record tie-break counts, computed lazily once and shared across
+  // keys: intent = applied strict ancestors ranked below witness,
+  // wit = applied strict ancestors ranked as witnesses — the same counts
+  // deriveLegacy re-derives by walking anc[c] inside its comparator.
+  const intentCnt = new Int32Array(anc.n).fill(-1);
+  const witCnt = new Int32Array(anc.n).fill(-1);
+  const countsOf = (row: number): [number, number] => {
+    if (intentCnt[row] < 0) {
+      intentCnt[row] = maskedPopcount(anc, row, anc.intentMask);
+      witCnt[row] = maskedPopcount(anc, row, anc.witnessMask);
+    }
+    return [intentCnt[row], witCnt[row]];
+  };
+
+  const union = new Uint32Array(anc.words);
+  const state: { [key: string]: unknown } = {};
+  const conflicts: Conflict[] = [];
+  for (const k of Object.keys(setters).sort(cmpCodePoints)) {
+    const cands = [...setters[k]].sort(cmpCodePoints);
+    let best = Infinity;
+    for (const c of cands) best = Math.min(best, rankOf(idx[c]));
+    const pool = cands.filter((c) => rankOf(idx[c]) === best);
+    // Exact maximality: a candidate is dominated iff it is a (transitive)
+    // ancestor of ANY other pool candidate — iff its bit is set in the
+    // union of the pool's ancestor rows. (A row never contains its own
+    // bit, so including the candidate's own row in the union is harmless.)
+    union.fill(0);
+    for (const d of pool) {
+      const drow = (anc.pos.get(d) as number) * anc.words;
+      for (let w = 0; w < anc.words; w++) union[w] |= anc.bits[drow + w];
+    }
+    const maximal = pool
+      .filter((c) => {
+        const ci = anc.pos.get(c) as number;
+        return (union[ci >> 5] & (1 << (ci & 31))) === 0;
+      })
+      .sort(cmpCodePoints);
+    let winner: string;
+    if (maximal.length === 1) {
+      winner = maximal[0];
+    } else {
+      winner = [...maximal].sort((a, b) => {
+        const [ai, aw] = countsOf(anc.pos.get(a) as number);
+        const [bi, bw] = countsOf(anc.pos.get(b) as number);
+        if (ai !== bi) return bi - ai; // most intent ancestors first
+        if (aw !== bw) return aw - bw; // then fewest witness ancestors
+        return cmpCodePoints(a, b); // then smallest id
       })[0];
     }
 
@@ -705,8 +942,12 @@ export function verifyCheckpoint(
  * cycle-excluded witnesses are absent, exactly as they are absent from
  * derive()'s state). derive()'s own output is untouched, so /api/state is
  * unaffected.
+ *
+ * LEGACY IMPLEMENTATION (witnessFreshnessLegacy): a per-witness DFS over
+ * the parent graph. Frozen as the differential oracle for the bitset
+ * implementation (witnessFreshness, below).
  */
-export function witnessFreshness(records: FoldRecord[]): { [id: string]: number } {
+export function witnessFreshnessLegacy(records: FoldRecord[]): { [id: string]: number } {
   const idx = indexRecords([...records]);
   const out = derive(records);
   const applied = new Set<string>(out.order);
@@ -730,6 +971,32 @@ export function witnessFreshness(records: FoldRecord[]): { [id: string]: number 
   for (const rid of out.order) {
     const kind = (idx[rid] as { kind?: unknown }).kind;
     if (kind === "witness") result[rid] = total - ancestorsIncl(rid).size;
+  }
+  return result;
+}
+
+/**
+ * witnessFreshness on the bitset engine. recordsBehind(w) counts the
+ * applied records outside w's causal past (w included in its own past);
+ * on bitsets that is `total − (popcount(ancestors(w)) + 1)` — every
+ * ancestor of an applied record is itself applied, so the row popcount
+ * is exactly the size of the legacy DFS's applied-restricted set.
+ * Byte-identical to witnessFreshnessLegacy (differential-tested).
+ */
+export function witnessFreshness(records: FoldRecord[]): { [id: string]: number } {
+  const idx = indexRecords([...records]);
+  const out = derive(records);
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+  const anc = buildAncestry(out.order, parents, idx);
+
+  const total = out.order.length;
+  const result: { [id: string]: number } = {};
+  for (const rid of out.order) {
+    const kind = (idx[rid] as { kind?: unknown }).kind;
+    if (kind === "witness") {
+      result[rid] = total - (rowPopcount(anc, anc.pos.get(rid) as number) + 1);
+    }
   }
   return result;
 }
