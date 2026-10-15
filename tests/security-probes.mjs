@@ -186,5 +186,31 @@ await probe("POST /api/repos binding failure (not a duplicate) -> clean 500", ({
   () => R("POST", "/api/repos", { key: KEY, json: true, body: JSON.stringify({ name: "probe-new" }) }),
   (res, body) => [...status(500)(res), ...has("/internal/path/xyz")(res, body), ...has("binding exploded")(res, body), ...has('"message"')(res, body)]);
 
+// 14. Baseline security headers (gauntlet M5 salvage — verified absent in
+// wave 1). Every response is built by json()/html() in src/worker.ts, so
+// the assertions cover a public JSON route, the router's own 404, an
+// error response, and the HTML projection: the layer, not the route.
+const hdr = (name, want) => (res) => {
+  const got = res.headers && typeof res.headers.get === "function" ? res.headers.get(name) : null;
+  return got === want ? [] : [`header ${name}: want ${JSON.stringify(want)}, got ${JSON.stringify(got)}`];
+};
+await probe("GET /api/state carries x-content-type-options: nosniff", null,
+  () => R("GET", "/api/state?project=poc-quilt-1"),
+  (res) => [...status(200)(res), ...hdr("x-content-type-options", "nosniff")(res)]);
+await probe("GET /api/nowhere (router 404) carries nosniff", null,
+  () => R("GET", "/api/nowhere"),
+  (res) => [...status(404)(res), ...hdr("x-content-type-options", "nosniff")(res)]);
+await probe("POST /api/repos without key (401) carries nosniff", null,
+  () => R("POST", "/api/repos", { json: true, body: JSON.stringify({ name: "probe-hdr" }) }),
+  (res) => [...status(401)(res), ...hdr("x-content-type-options", "nosniff")(res)]);
+await probe("GET / (HTML projection) carries the full HTML header set", null,
+  () => R("GET", "/?project=poc-quilt-1"),
+  (res) => [
+    ...status(200)(res),
+    ...hdr("x-content-type-options", "nosniff")(res),
+    ...hdr("referrer-policy", "no-referrer")(res),
+    ...hdr("x-frame-options", "DENY")(res),
+  ]);
+
 console.log(failures === 0 ? "\nALL PROBES PASS" : `\n${failures} probe(s) failing`);
 process.exit(failures === 0 ? 0 : 1);

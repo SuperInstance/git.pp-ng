@@ -1,0 +1,7 @@
+{
+  "name": "git.pp-ng",
+  "private": true,
+  "scripts": {
+    "test": "cd conformance && python3 harness.py"
+  }
+}

@@ -13,6 +13,17 @@ https://github.com/SuperInstance/git.pp-ng/blob/main/demo/gitpp-demo.mp4
 
 (The file also lives in this repo at `demo/gitpp-demo.mp4`.)
 
+## Prove it in two commands
+
+Everything claimed below is checkable from a cold clone — no Cloudflare account, no admin key:
+
+```sh
+cd conformance && python3 harness.py
+python3 runner/pp.py state poc-quilt-1
+```
+
+The harness ends with **863/863 cases identical** — the TypeScript fold in `src/fold.ts` against the Python referee in `referee/fold.py`, plus 1,029 checkpoint probes, 3,231 witness-freshness checks, 16,290 closure-root digests, 2,812 oracle checks, 3 transport pins, and 8 live-golden checks, all passing. (`npm test` runs the same harness.) The runner reads the live demo project and prints `config.timeout = 45` — conflict winner **override-1**, losers task-a, task-b, task-d preserved, orphans none.
+
 ## Mechanism
 
 - The atom is the **task**. For each task, a dedicated **Artifacts repository** is forked from a shared baseline, with a repo-scoped token, and agents push their competing completions into an append-only record. Project state is not stored anywhere — it is derived by folding the record.
