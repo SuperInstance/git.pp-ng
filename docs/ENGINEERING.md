@@ -240,6 +240,27 @@ suspected mechanism is a chunked-transfer / connection-reuse interaction between
 Operator guidance: page large listings, or fetch via `curl`; the Worker response
 itself is well-formed (curl and browsers read it whole).
 
+**Public derivation cost (the honest price of the public face).** The read
+routes are public by design, and a state read is not free: every
+`GET /api/state` runs the full collection + fold for its project, and no
+route authenticates or throttles the caller. The measured shape at the
+62-record scale project: **126 binding calls** per read (2 list + 61 get +
+1 log + 62 readFile) and **2.9–5.7 s** live latency, almost all of it
+collection — an unauthenticated caller can amplify that cost at will, and
+the namespace's 5,000-repo ceiling (drop site #6) bounds the worst case
+only loosely. Mitigations, as they land: the bounded-concurrency
+collection above took the read from ~14 s warm / ~31 s cold sequential to
+the 2.9–5.7 s band; the bitset ancestry engine (PR #14) removed the fold
+as the scaling term — a 5,000-record derive fell from 2,712 ms / 1,266 MB
+peak RSS to 110 ms / 117.5 MB — leaving the collection reads as the
+remaining cost; checkpoint+tail derivation (in flight) starts from the
+newest verified checkpoint and folds only the tail, which cuts the
+collection itself. Deliberately not done: response caching. The
+projection is derived fresh on every request by doctrine — a cached
+projection is a stale projection, and staleness here is a correctness bug,
+not a performance feature. If throttling is ever needed it belongs at the
+edge in front of the Worker, not as a cache inside it.
+
 ---
 
 ## Part 3 — gated-routes & `DEPLOY.md` security claims, line by line

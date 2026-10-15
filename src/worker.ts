@@ -71,10 +71,28 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 // helpers
 // ---------------------------------------------------------------------------
 
+// Every response this Worker sends is built by json() or html() below —
+// the single response-construction layer — so the baseline security
+// headers (gauntlet M5 salvage: they were verified absent) cannot be
+// missed by any route.
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+function html(body: string): Response {
+  return new Response(body, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+      "x-frame-options": "DENY",
+    },
   });
 }
 
@@ -608,12 +626,7 @@ async function handleRoot(request: Request, env: Env): Promise<Response> {
     project,
   );
   const recordsView = buildRecordsView(records, out, origin, witnessFreshness(records));
-  return new Response(
-    renderProjection(project, out, recordCount, repos, recordsView),
-    {
-      headers: { "content-type": "text/html; charset=utf-8" },
-    },
-  );
+  return html(renderProjection(project, out, recordCount, repos, recordsView));
 }
 
 async function handleRecords(request: Request, env: Env): Promise<Response> {
