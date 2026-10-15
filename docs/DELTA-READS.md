@@ -94,18 +94,17 @@ frontier — is in `docs/FRONTIER-CHECKPOINTS.md`. Staleness costs exactly
 the appends since creation: coverage does not rot, the absolute saving is
 pinned at creation, and refresh is just another `pp.py checkpoint` run.
 
-**Expected live effect — an expectation, not a promise.** With n appends
-since the checkpoint, a frontier read costs ≈ **6 + 2n** binding calls
-(2 `list` + `get` + `log` + the checkpoint read + the carrying commit's
-null read, then 2 per tail repo) against the full fold's 6 + 2|C| + 2n.
-What remains after the fan-out is gone is the **serial prefix** — four
-strictly serial substrate calls that no checkpoint shape can remove — which
-the design note prices at roughly half of poc-scale-1's 2.42 s full-fold
-read, for an expected landing band of ≈ **1.3–1.8 s** live. That band comes
-from `research/deep/frontier-checkpoints.md` §4's arithmetic, not from a
-measurement of this wiring; it gets re-measured against the live project
-when the wiring is deployed, and should not be quoted as a result until
-then.
+**Live effect — predicted, then measured.** With n appends since the
+checkpoint, a frontier read costs ≈ **6 + 2n** binding calls (2 `list` +
+`get` + `log` + the checkpoint read + the carrying commit's null read, then
+2 per tail repo) against the full fold's 6 + 2|C| + 2n. What remains after
+the fan-out is gone is the **serial prefix** — four strictly serial
+substrate calls that no checkpoint shape can remove. Before deployment, the
+design note (`research/deep/frontier-checkpoints.md` §4) priced that prefix
+at roughly half of poc-scale-1's 2.42 s full-fold read and predicted a
+landing band of ≈ 1.3–1.8 s. Measured after deployment, a frontier
+checkpoint (closure 62/62) reads at a **≈0.93 s median** (n=7, 0.65–1.62 s)
+— below the predicted band (`RESULTS.md` §1.4).
 
 ## Correctness — the full fold stays the reference
 

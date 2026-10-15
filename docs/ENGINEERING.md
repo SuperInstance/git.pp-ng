@@ -253,9 +253,11 @@ collection above took the read from ~14 s warm / ~31 s cold sequential to
 the 2.9–5.7 s band; the bitset ancestry engine (PR #14) removed the fold
 as the scaling term — a 5,000-record derive fell from 2,712 ms / 1,266 MB
 peak RSS to 110 ms / 117.5 MB — leaving the collection reads as the
-remaining cost; checkpoint+tail derivation (in flight) starts from the
-newest verified checkpoint and folds only the tail, which cuts the
-collection itself. Deliberately not done: response caching. The
+remaining cost; checkpoint+tail derivation (shipped, `docs/DELTA-READS.md`)
+serves the records a verified checkpoint covers without re-reading them and
+reads only the tail, which cuts the collection itself — on `poc-scale-1` a
+frontier checkpoint reads at ≈0.93 s against 2.42 s for the full fold
+(`RESULTS.md` §1.4). Deliberately not done: response caching. The
 projection is derived fresh on every request by doctrine — a cached
 projection is a stale projection, and staleness here is a correctness bug,
 not a performance feature. If throttling is ever needed it belongs at the
