@@ -248,9 +248,10 @@ Each item carries the evidence that argues for it.
   (the five-year read) converged on it, and §1.4's ceiling is the
   proof from our side — the remaining live cost is serial platform
   calls no client can batch away.
-- **Format v2: records born with digests.** *Designed, not yet built*
-  (design note in the programme record; no build PR exists at the time
-  of writing). One optional field, valued with checkpoint v2's existing
+- **Format v2: records born with digests.** *Built and live*
+  (PR #25, merged and deployed 2026-10-14; conformance: FORMAT-V2 19/19,
+  born-ignored sweep 1,758 derivations byte-identical, root assembly
+  16,436 == recomputed, the pinned closure root unmoved). One optional field, valued with checkpoint v2's existing
   leaf, so ports stop re-deriving the dialect. The trust rule is the
   design's core: **the fold never reads the field** — a born digest is
   a claim, verification stays lazy and falls back to recomputation,
