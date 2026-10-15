@@ -7,6 +7,7 @@ import {
   witnessFreshness,
   checkpointRoot,
   buildCheckpoint,
+  buildFrontierCheckpoint,
   deriveDelta,
   type FoldRecord,
 } from "../src/fold.ts";
@@ -57,6 +58,26 @@ const results = cases.map((c) => ({
       return [id, deriveDelta(cp, tail)];
     }),
   ),
+  // Frontier checkpoint (auto frontier = maximal applied records): the
+  // harness checks the built checkpoint (members, root, covered count)
+  // against the referee's, and that delta derivation over it equals the
+  // full derive. null when no frontier checkpoint exists for the case.
+  frontier: (() => {
+    const fcp = buildFrontierCheckpoint(c.records);
+    if (fcp === null) return null;
+    const closureSet = new Set(
+      fcp.closure.map((r) => String((r as { id?: unknown }).id)),
+    );
+    const tail = c.records.filter(
+      (r) => !closureSet.has(String((r as { id?: unknown }).id)),
+    );
+    return {
+      at: fcp.at,
+      closureRoot: fcp.closureRoot,
+      covered: fcp.closure.length,
+      delta: deriveDelta(fcp, tail),
+    };
+  })(),
 }));
 writeFileSync(resultsPath, JSON.stringify(results));
 console.log(`runner: ${results.length} cases`);

@@ -148,6 +148,41 @@ def _closure_ids(at, idx, parents):
     return closure
 
 
+def _frontier_members(at):
+    """Normalise a checkpoint `at` — string form (v2) or frontier array form
+    (docs/FRONTIER-CHECKPOINTS.md) — to a member list, or None if the form is
+    malformed: an empty array, duplicate members, or non-string members.
+    Readers dispatch structurally on the type; malformed arrays are rejected
+    here so every caller (root / verify / frontier build / derive_delta)
+    fails safe the same way. A non-string scalar keeps the historical
+    String() coercion of the singleton path."""
+    if isinstance(at, str):
+        return [at]
+    if isinstance(at, (list, tuple)):
+        if not at:
+            return None
+        if any(not isinstance(m, str) for m in at):
+            return None
+        if len(set(at)) != len(at):
+            return None
+        return list(at)
+    return [str(at)]
+
+
+def _closure_ids_multi(members, idx, parents):
+    """Union of the ancestor closures of every member. None if any member is
+    absent or any member's closure is incomplete."""
+    union = set()
+    for m in members:
+        if m not in idx:
+            return None
+        cl = _closure_ids(m, idx, parents)
+        if cl is None:
+            return None
+        union |= cl
+    return union
+
+
 def checkpoint_root(records, at):
     """Deterministic digest of `at`'s full ancestor closure as seen in `records`.
     None if `at` is absent or its closure is incomplete.
@@ -156,13 +191,19 @@ def checkpoint_root(records, at):
                                for id in sorted(closureIds, code-point) ) )
 
     where leaf(rec) = SHA-256( json.dumps({id, parents sorted, kind, effects,
-    reason}, sort_keys=True, ensure_ascii=True) ), both as lowercase hex."""
+    reason}, sort_keys=True, ensure_ascii=True) ), both as lowercase hex.
+
+    Frontier form: `at` may be a LIST of record ids, in which case the digest
+    is computed by the identical construction over the UNION of the members'
+    closures — v2's root was always a digest of a set of ids; the singleton
+    closure was just the set it happened to be computed over. A one-member
+    list therefore digests byte-identically to the string form."""
     idx = _index(records)
-    at = str(at)
-    if at not in idx:
+    members = _frontier_members(at)
+    if members is None:
         return None
     parents = {rid: _parents(rec) for rid, rec in idx.items()}
-    closure = _closure_ids(at, idx, parents)
+    closure = _closure_ids_multi(members, idx, parents)
     if closure is None:
         return None
     entries = [f"{rid}:{_record_leaf(idx[rid])}" for rid in sorted(closure)]
@@ -324,7 +365,17 @@ def verify_checkpoint(records, checkpoint):
       "STATE-ONLY" state matches but the closure has changed since the checkpoint
                    (the honest v1 answer, now labelled — never a silent VERIFIED);
       "MISMATCH"   the state differs (or the checkpoint shape is unusable).
-    Backwards compatible: callers that pass no root get exactly v1 behaviour."""
+    Backwards compatible: callers that pass no root get exactly v1 behaviour.
+
+    Frontier form: `at` may be a LIST of ids (docs/FRONTIER-CHECKPOINTS.md).
+    The covered set C is the union of the members' closures, recomputed
+    within the presented set: state is derive(C).state, the root is the v2
+    construction over C. Descendant growth never enters a member's closure,
+    so a grown set still verifies VERIFIED; a member absent from the set, or
+    any member's closure incomplete in it (a covered record removed), cannot
+    reproduce C and is MISMATCH; a covered member re-versioned in a way the
+    fold ignores (a `reason`-only change) is STATE-ONLY. A malformed array
+    (empty, duplicates, non-string members) is MISMATCH / False as above."""
     if not isinstance(checkpoint, dict):
         return False
     expected_root = checkpoint.get("closureRoot")
@@ -332,7 +383,9 @@ def verify_checkpoint(records, checkpoint):
     at, want = checkpoint.get("at"), checkpoint.get("state")
     if at is None or not isinstance(want, dict):
         return "MISMATCH" if v2 else False
-    at = str(at)
+    members = _frontier_members(at)
+    if members is None:
+        return "MISMATCH" if v2 else False
     # Compare the declared state in the SAME number domain the fold uses:
     # float64-canonicalise the checkpoint's values exactly as derive()
     # canonicalises record effects (ADDENDUM #4 P1).
@@ -340,11 +393,10 @@ def verify_checkpoint(records, checkpoint):
 
     idx = _index(records)
     parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    closure = _closure_ids_multi(members, idx, parents)
     state_ok = False
-    if at in idx:
-        closure = _closure_ids(at, idx, parents)
-        if closure is not None:
-            state_ok = derive([idx[r] for r in sorted(closure)])["state"] == want
+    if closure is not None:
+        state_ok = derive([idx[r] for r in sorted(closure)])["state"] == want
 
     if not v2:
         return state_ok
@@ -385,6 +437,55 @@ def build_checkpoint(records, at):
     }
 
 
+def build_frontier_checkpoint(records, frontier_ids=None):
+    """Construct a FRONTIER checkpoint (docs/FRONTIER-CHECKPOINTS.md): `at`
+    names a SET of records — the frontier — and the checkpoint pins the union
+    C of their ancestor closures, with state = derive(C).state and the v2
+    closure root computed over C by the identical construction.
+
+    With frontier_ids omitted, the frontier is computed as the maximal
+    APPLIED records (applied records no other applied record descends from).
+    For that frontier, C is exactly derive's applied set — every applied
+    record is an ancestor-or-self of a maximal applied record, and every
+    ancestor of an applied record is applied — so the pinned state is the
+    full derived state of `records`, not a partial state.
+
+    Canonical form: a one-member frontier is emitted in the STRING form, so
+    the result is byte-identical to build_checkpoint at that record; the
+    array form always means |F| >= 2. Members are emitted sorted by code
+    point. Returns None when no valid checkpoint exists: no applied records
+    (auto frontier), an absent member, an incomplete member closure, or a
+    malformed member list."""
+    idx = _index(records)
+    parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    if frontier_ids is None:
+        applied = derive(records)["order"]
+        if not applied:
+            return None
+        applied_set = set(applied)
+        has_applied_child = set()
+        for rid in applied:
+            for p in parents[rid]:
+                if p in applied_set:
+                    has_applied_child.add(p)
+        members = sorted(r for r in applied if r not in has_applied_child)
+    else:
+        members = _frontier_members(frontier_ids)
+        if members is None:
+            return None
+        members = sorted(members)
+    closure = _closure_ids_multi(members, idx, parents)
+    if closure is None:
+        return None
+    closure_records = [idx[rid] for rid in sorted(closure)]
+    return {
+        "at": members[0] if len(members) == 1 else list(members),
+        "state": derive(closure_records)["state"],
+        "closureRoot": checkpoint_root(records, members),
+        "closure": closure_records,
+    }
+
+
 def derive_delta(checkpoint, tail_records):
     """Delta derivation: reconstruct the full record set from a checkpoint's
     stored closure plus the freshly-read `tail_records`, then derive() it.
@@ -401,7 +502,12 @@ def derive_delta(checkpoint, tail_records):
 
     When it returns a dict, that dict equals derive(closure ∪ tail) exactly —
     and since a well-formed caller passes tail = (all current records) minus the
-    closure, that is derive(all current records), byte-for-byte."""
+    closure, that is derive(all current records), byte-for-byte.
+
+    Frontier form: the checkpoint's `at` may be a LIST of ids
+    (docs/FRONTIER-CHECKPOINTS.md); the stored closure must then be exactly
+    the union of the members' ancestor closures within itself. The string
+    form is the one-member special case, unchanged."""
     if not isinstance(checkpoint, dict):
         return None
     at = checkpoint.get("at")
@@ -411,7 +517,9 @@ def derive_delta(checkpoint, tail_records):
     if (at is None or not isinstance(want, dict)
             or not isinstance(expected_root, str) or not isinstance(closure, list)):
         return None
-    at = str(at)
+    members = _frontier_members(at)
+    if members is None:
+        return None
     closure_ids = set()
     for r in closure:
         if not isinstance(r, dict) or not isinstance(r.get("id"), str):
@@ -419,13 +527,13 @@ def derive_delta(checkpoint, tail_records):
         if r["id"] in closure_ids:
             return None  # duplicate id in the closure — ambiguous
         closure_ids.add(r["id"])
-    if at not in closure_ids:
+    if any(m not in closure_ids for m in members):
         return None
-    # The stored closure must be exactly `at`'s ancestor closure within itself
-    # (no extra, no missing), and its root must match the pinned value.
+    # The stored closure must be exactly the members' ancestor closure within
+    # itself (no extra, no missing), and its root must match the pinned value.
     idx = _index(closure)
     parents = {rid: _parents(rec) for rid, rec in idx.items()}
-    cl = _closure_ids(at, idx, parents)
+    cl = _closure_ids_multi(members, idx, parents)
     if cl is None or cl != closure_ids:
         return None
     if checkpoint_root(closure, at) != expected_root:

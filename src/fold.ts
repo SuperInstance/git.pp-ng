@@ -847,6 +847,45 @@ function closureIds(
   return [...closure];
 }
 
+/** Normalise a checkpoint `at` — string form (v2) or frontier array form
+ * (docs/FRONTIER-CHECKPOINTS.md) — to a member list, or null if the form is
+ * malformed: an empty array, duplicate members, or non-string members.
+ * Readers dispatch structurally on the type; malformed arrays are rejected
+ * here so every caller (root / verify / frontier build / deriveDelta) fails
+ * safe the same way. A non-string scalar keeps the historical String()
+ * coercion of the singleton path. Mirrors the referee's _frontier_members. */
+function frontierMembers(at: unknown): string[] | null {
+  if (typeof at === "string") return [at];
+  if (Array.isArray(at)) {
+    if (at.length === 0) return null;
+    const seen = new Set<string>();
+    for (const m of at) {
+      if (typeof m !== "string") return null;
+      if (seen.has(m)) return null;
+      seen.add(m);
+    }
+    return [...at] as string[];
+  }
+  return [String(at)];
+}
+
+/** Union of the ancestor closures of every member, or null if any member is
+ * absent or any member's closure is incomplete. */
+function closureIdsMulti(
+  members: string[],
+  idx: { [id: string]: FoldRecord },
+  parents: ParentsMap,
+): string[] | null {
+  const union = new Set<string>();
+  for (const m of members) {
+    if (!Object.prototype.hasOwnProperty.call(idx, m)) return null;
+    const cl = closureIds(m, idx, parents);
+    if (cl === null) return null;
+    for (const id of cl) union.add(id);
+  }
+  return [...union];
+}
+
 /**
  * Deterministic digest of `at`'s full ancestor closure as seen in `records`;
  * null if `at` is absent or its closure is incomplete. Mirrors the referee's
@@ -857,17 +896,23 @@ function closureIds(
  *
  * where recordLeaf covers the whole canonical record (id, parents sorted, kind,
  * effects, reason) in the float64 domain.
+ *
+ * Frontier form: `at` may be an ARRAY of ids, in which case the digest is
+ * computed by the identical construction over the UNION of the members'
+ * closures — v2's root was always a digest of a set of ids; the singleton
+ * closure was just the set it happened to be computed over. A one-member
+ * array therefore digests byte-identically to the string form.
  */
 export function checkpointRoot(
   records: FoldRecord[],
-  at: string,
+  at: string | string[],
 ): string | null {
   const idx = indexRecords([...records]);
-  const atId = String(at);
-  if (!Object.prototype.hasOwnProperty.call(idx, atId)) return null;
+  const members = frontierMembers(at);
+  if (members === null) return null;
   const parents: ParentsMap = {};
   for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
-  const closure = closureIds(atId, idx, parents);
+  const closure = closureIdsMulti(members, idx, parents);
   if (closure === null) return null;
   const entries = closure
     .sort(cmpCodePoints)
@@ -888,6 +933,16 @@ export type CheckpointResult = boolean | "VERIFIED" | "STATE-ONLY" | "MISMATCH";
  * matches but the closure has changed since the checkpoint — the honest v1
  * answer, now labelled, never a silent VERIFIED), or "MISMATCH" (state differs,
  * or the checkpoint shape is unusable). Backwards compatible.
+ *
+ * Frontier form: `at` may be an ARRAY of ids (docs/FRONTIER-CHECKPOINTS.md).
+ * The covered set C is the union of the members' closures, recomputed within
+ * the presented set: state is derive(C).state, the root is the v2 construction
+ * over C. Descendant growth never enters a member's closure, so a grown set
+ * still verifies VERIFIED; a member absent from the set, or any member's
+ * closure incomplete in it (a covered record removed), cannot reproduce C and
+ * is MISMATCH; a covered member re-versioned in a way the fold ignores (a
+ * `reason`-only change) is STATE-ONLY. A malformed array (empty, duplicates,
+ * non-string members) is MISMATCH / false as above.
  */
 export function verifyCheckpoint(
   records: FoldRecord[],
@@ -907,23 +962,22 @@ export function verifyCheckpoint(
   ) {
     return v2 ? "MISMATCH" : false;
   }
-  const at = String(atRaw);
+  const members = frontierMembers(atRaw);
+  if (members === null) return v2 ? "MISMATCH" : false;
 
   const idx = indexRecords([...records]);
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+  const closure = closureIdsMulti(members, idx, parents);
   let stateOk = false;
-  if (Object.prototype.hasOwnProperty.call(idx, at)) {
-    const parents: ParentsMap = {};
-    for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
-    const closure = closureIds(at, idx, parents);
-    if (closure !== null) {
-      const subset = closure.sort(cmpCodePoints).map((rid) => idx[rid]);
-      stateOk = pyDeepEqual(derive(subset).state, want);
-    }
+  if (closure !== null) {
+    const subset = closure.sort(cmpCodePoints).map((rid) => idx[rid]);
+    stateOk = pyDeepEqual(derive(subset).state, want);
   }
 
   if (!v2) return stateOk;
   if (!stateOk) return "MISMATCH";
-  const actualRoot = checkpointRoot(records, at);
+  const actualRoot = checkpointRoot(records, members);
   return actualRoot === String(expectedRoot) ? "VERIFIED" : "STATE-ONLY";
 }
 
@@ -938,7 +992,9 @@ export function verifyCheckpoint(
 // ---------------------------------------------------------------------------
 
 export interface Checkpoint {
-  at: string;
+  /** A single record id (v2 string form), or the frontier member ids
+   * (frontier array form, |F| >= 2 — see buildFrontierCheckpoint). */
+  at: string | string[];
   state: { [key: string]: unknown };
   closureRoot: string;
   closure: FoldRecord[];
@@ -969,12 +1025,76 @@ export function buildCheckpoint(
   };
 }
 
+/**
+ * Construct a FRONTIER checkpoint (docs/FRONTIER-CHECKPOINTS.md): `at` names
+ * a SET of records — the frontier — and the checkpoint pins the union C of
+ * their ancestor closures, with state = derive(C).state and the v2 closure
+ * root computed over C by the identical construction.
+ *
+ * With `frontierIds` omitted, the frontier is computed as the maximal
+ * APPLIED records (applied records no other applied record descends from).
+ * For that frontier, C is exactly derive's applied set — every applied
+ * record is an ancestor-or-self of a maximal applied record, and every
+ * ancestor of an applied record is applied — so the pinned state is the
+ * full derived state of `records`, not a partial state.
+ *
+ * Canonical form: a one-member frontier is emitted in the STRING form, so
+ * the result is byte-identical to buildCheckpoint at that record; the array
+ * form always means |F| >= 2. Members are emitted sorted by code point.
+ * Returns null when no valid checkpoint exists: no applied records (auto
+ * frontier), an absent member, an incomplete member closure, or a malformed
+ * member list. Mirrors the referee's build_frontier_checkpoint.
+ */
+export function buildFrontierCheckpoint(
+  records: FoldRecord[],
+  frontierIds?: string[],
+): Checkpoint | null {
+  const idx = indexRecords([...records]);
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+  let members: string[];
+  if (frontierIds === undefined) {
+    const applied = derive(records).order;
+    if (applied.length === 0) return null;
+    const appliedSet = new Set<string>(applied);
+    const hasAppliedChild = new Set<string>();
+    for (const rid of applied) {
+      for (const p of parents[rid]) {
+        if (appliedSet.has(p)) hasAppliedChild.add(p);
+      }
+    }
+    members = applied
+      .filter((r) => !hasAppliedChild.has(r))
+      .sort(cmpCodePoints);
+  } else {
+    const norm = frontierMembers(frontierIds);
+    if (norm === null) return null;
+    members = [...norm].sort(cmpCodePoints);
+  }
+  const closure = closureIdsMulti(members, idx, parents);
+  if (closure === null) return null;
+  const closureRecords = closure.sort(cmpCodePoints).map((rid) => idx[rid]);
+  const root = checkpointRoot(records, members);
+  if (root === null) return null;
+  return {
+    at: members.length === 1 ? members[0] : [...members],
+    state: derive(closureRecords).state,
+    closureRoot: root,
+    closure: closureRecords,
+  };
+}
+
 /** Delta derivation. Returns a DeriveOutput equal to derive(closure ∪ tail), or
  * null to signal "fall back to the full fold". Null on any doubt: malformed
  * checkpoint, a duplicate id in the closure, a stored closure that is not
  * exactly `at`'s ancestor closure or whose root != the pinned closureRoot,
  * a closure that does not re-derive to the pinned state, or a tail record that
- * shares an id with the closure. */
+ * shares an id with the closure.
+ *
+ * Frontier form: the checkpoint's `at` may be an ARRAY of ids
+ * (docs/FRONTIER-CHECKPOINTS.md); the stored closure must then be exactly
+ * the union of the members' ancestor closures within itself. The string
+ * form is the one-member special case, unchanged. */
 export function deriveDelta(
   checkpoint: Checkpoint | null | undefined,
   tailRecords: FoldRecord[],
@@ -982,7 +1102,7 @@ export function deriveDelta(
   if (typeof checkpoint !== "object" || checkpoint === null) return null;
   const { at, state, closureRoot, closure } = checkpoint;
   if (
-    typeof at !== "string" ||
+    (typeof at !== "string" && !Array.isArray(at)) ||
     typeof state !== "object" ||
     state === null ||
     Array.isArray(state) ||
@@ -991,6 +1111,8 @@ export function deriveDelta(
   ) {
     return null;
   }
+  const members = frontierMembers(at);
+  if (members === null) return null;
   const closureIdSet = new Set<string>();
   for (const r of closure) {
     const id = (r as { id?: unknown }).id;
@@ -998,17 +1120,18 @@ export function deriveDelta(
     if (closureIdSet.has(id)) return null; // duplicate id in the closure
     closureIdSet.add(id);
   }
-  if (!closureIdSet.has(at)) return null;
-  // The stored closure must be exactly `at`'s ancestor closure within itself.
+  if (!members.every((m) => closureIdSet.has(m))) return null;
+  // The stored closure must be exactly the members' ancestor closure within
+  // itself.
   const idx = indexRecords([...closure]);
   const parents: ParentsMap = {};
   for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
-  const cl = closureIds(at, idx, parents);
+  const cl = closureIdsMulti(members, idx, parents);
   if (cl === null) return null;
   if (cl.length !== closureIdSet.size || !cl.every((id) => closureIdSet.has(id))) {
     return null;
   }
-  if (checkpointRoot(closure, at) !== closureRoot) return null;
+  if (checkpointRoot(closure, members) !== closureRoot) return null;
   if (!pyDeepEqual(derive(closure).state, state)) return null;
   for (const r of tailRecords) {
     const id = (r as { id?: unknown }).id;

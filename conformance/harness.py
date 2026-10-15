@@ -6,6 +6,10 @@ Cases come from: property fixtures over small hand-built DAGs, randomized
 stress generators (seeded), the live record sets (conformance/live-records.json),
 and hand-built edge cases (cycles, duplicate ids, unknown kinds, bool/int value
 collisions, unicode/non-BMP ids, non-JS-safe integers, checkpoint forgery).
+A separate FRONTIER family (set-form checkpoints, docs/FRONTIER-CHECKPOINTS.md)
+is compared and counted apart so the classic totals stay literally unchanged;
+every case in both families also has its auto-frontier checkpoint checked
+(delta == full derive, covered set == applied set, cross-port identical).
 
 The Python referee is the live oracle: expected outputs are computed by running
 fold.py at harness time, never hardcoded. A divergence is a bug in the port, by
@@ -433,6 +437,134 @@ CKPT_V2_EXPECTED = {
     "ckpt-v2-reason-tamper": "STATE-ONLY",
 }
 
+# --- FRONTIER CHECKPOINTS (docs/FRONTIER-CHECKPOINTS.md) -------------------
+# The set-form generalisation of checkpoint v2: `at` may be a LIST of
+# frontier ids pinning the union of their ancestor closures, root computed
+# by the identical construction. These cases form a SEPARATE family so the
+# classic totals stay literally unchanged; the frontier family is compared
+# cross-port and counted on its own line. Independently, main() checks the
+# AUTO frontier checkpoint of EVERY case in both families (delta == full,
+# covered set == applied set, cross-port identical).
+FRONTIER_CASES = []
+
+
+def _f_case(name, records, probes):
+    FRONTIER_CASES.append({"name": name,
+                           "records": [dict(r) for r in records],
+                           "probes": probes})
+
+
+# A wide, shallow DAG — three strands off one genesis, a frontier of three.
+_F = [
+    R("g", [], "task", {"project": "frontier-demo"}),
+    R("a1", ["g"], "task", {"x": 1}),
+    R("ov", ["a1"], "override", {"x": 2}, reason="captain: x is 2 on strand a"),
+    R("a2", ["ov"], "task", {"y": "a"}),
+    R("b1", ["g"], "task", {"z": 1}),
+    R("b2", ["b1"], "task", {"z": 2}),
+    R("w", ["g"], "witness", {"seen": True}),
+]
+_F_MEMBERS = ["a2", "b2", "w"]  # the maximal applied records, code-point order
+_F_ROOT = ref.checkpoint_root([dict(r) for r in _F], _F_MEMBERS)
+_F_STATE = derive([dict(r) for r in _F])["state"]  # C == applied: the full state
+_F_PROBE = {"at": _F_MEMBERS, "state": _F_STATE, "closureRoot": _F_ROOT}
+
+# (a) VERIFIED over the very set; the members are listed UNSORTED in the
+# probe — `at` is a set, its order in the file carries no meaning.
+_f_case("frontier-verified", _F,
+        [{"at": ["b2", "w", "a2"], "state": _F_STATE, "closureRoot": _F_ROOT}])
+# (b) Grown with descendants on top of the frontier: descendants never enter
+# a member's closure, so C, its root, and its derived state are unchanged —
+# still VERIFIED (the normal case for a frontier checkpoint).
+_F_GROWN = _F + [R("a3", ["a2"], "task", {"y": "a3"}),
+                 R("b3", ["b2"], "task", {}),
+                 R("w2", ["w"], "witness", {"seen2": True})]
+_f_case("frontier-growth-verified", _F_GROWN, [dict(_F_PROBE)])
+# (c) A record OUTSIDE C (an orphan beside the covered set) does not move the
+# verdict: verification ranges over C only and never claimed the rest.
+_F_BESIDE = _F + [R("orph", ["ghost"], "task", {"lost": 1})]
+_f_case("frontier-orphan-beside", _F_BESIDE, [dict(_F_PROBE)])
+# (d) A frontier member removed: C cannot be reproduced -> MISMATCH.
+_f_case("frontier-member-removed", [r for r in _F if r["id"] != "b2"],
+        [dict(_F_PROBE)])
+# (e) A covered ancestor removed: a member's closure is incomplete in the
+# presented set -> MISMATCH.
+_f_case("frontier-ancestor-removed", [r for r in _F if r["id"] != "a1"],
+        [dict(_F_PROBE)])
+# (f) A reason-only re-version of a covered record: the whole-record leaf
+# moves, the fold ignores `reason`, derive(C).state is unchanged -> STATE-ONLY.
+_F_REASON = [dict(r, reason="FORGED: a different reason") if r["id"] == "ov"
+             else dict(r) for r in _F]
+_f_case("frontier-reason-only", _F_REASON, [dict(_F_PROBE)])
+# (g) A covered record's effects tampered where the value REACHES the state
+# (b2 wins z): derive(C).state differs -> MISMATCH.
+_F_TAMPER = [dict(r, effects={"z": 999}) if r["id"] == "b2" else dict(r)
+             for r in _F]
+_f_case("frontier-covered-tamper", _F_TAMPER, [dict(_F_PROBE)])
+# (g2) The same tamper on a DOMINATED record (b1's z never reaches the state
+# — b2 supersedes it) is state-invisible: the leaf moves, the fold's answer
+# does not -> STATE-ONLY, exactly like a reason-only re-version.
+_F_DOM = [dict(r, effects={"z": 999}) if r["id"] == "b1" else dict(r)
+          for r in _F]
+_f_case("frontier-dominated-tamper", _F_DOM, [dict(_F_PROBE)])
+# (h) Singleton equivalence at the verify surface: an array of ONE is the
+# string form — same root, same verdicts (VERIFIED here; STATE-ONLY against
+# a forged root). Builder-level equivalence is pinned in main().
+_f_case("frontier-singleton-verified", _Sa,
+        [{"at": ["c"], "state": _state_a, "closureRoot": _root_a}])
+_f_case("frontier-singleton-state-only", _Sa,
+        [{"at": ["c"], "state": _state_a,
+          "closureRoot":
+          "0000000000000000000000000000000000000000000000000000000000000000"}])
+# (i) Malformed arrays are rejected (MISMATCH under a root): empty member
+# list, duplicated members, non-string members.
+_f_case("frontier-malformed-empty", _Sa,
+        [{"at": [], "state": _state_a, "closureRoot": _root_a}])
+_f_case("frontier-malformed-dup", _Sa,
+        [{"at": ["c", "c"], "state": _state_a, "closureRoot": _root_a}])
+_f_case("frontier-malformed-nonstr", _Sa,
+        [{"at": [123], "state": _state_a, "closureRoot": _root_a}])
+# (j) v1 (no closureRoot) with the array form: the plain bool over C.
+_f_case("frontier-v1-array-true", _F,
+        [{"at": _F_MEMBERS, "state": _F_STATE}])
+_f_case("frontier-v1-array-false", _F,
+        [{"at": _F_MEMBERS, "state": {"forged": 1}}])
+# (k) The frozen scale fixture at its true frontier: four members covering
+# 62/62, root pinned literally below (POC_SCALE1_FRONTIER_ROOT) and
+# recomputed from the construction in main().
+_SCALE = _LIVE["poc-scale-1"]
+_f_case("frontier-live-scale", _SCALE,
+        [{"at": ["t40", "t50", "t60", "witness-1"],
+          "state": derive([dict(r) for r in _SCALE])["state"],
+          "closureRoot": ref.checkpoint_root(
+              [dict(r) for r in _SCALE], ["t40", "t50", "t60", "witness-1"])}])
+# The frontier closure root over poc-scale-1's frontier {t40, t50, t60,
+# witness-1}: the union of the four closures is all 62 records.
+POC_SCALE1_FRONTIER_ROOT = \
+    "3a0919f1cee5e312f5913941116ead057d2b7ad8df998a09025157affaad99ac"
+
+# Explicit three-way / bool result pins for the frontier cases (the harness
+# otherwise only proves the two ports AGREE; these pin WHICH answer is
+# correct). Checked in main() against the referee.
+FRONTIER_EXPECTED = {
+    "frontier-verified": "VERIFIED",
+    "frontier-growth-verified": "VERIFIED",
+    "frontier-orphan-beside": "VERIFIED",
+    "frontier-member-removed": "MISMATCH",
+    "frontier-ancestor-removed": "MISMATCH",
+    "frontier-reason-only": "STATE-ONLY",
+    "frontier-covered-tamper": "MISMATCH",
+    "frontier-dominated-tamper": "STATE-ONLY",
+    "frontier-singleton-verified": "VERIFIED",
+    "frontier-singleton-state-only": "STATE-ONLY",
+    "frontier-malformed-empty": "MISMATCH",
+    "frontier-malformed-dup": "MISMATCH",
+    "frontier-malformed-nonstr": "MISMATCH",
+    "frontier-v1-array-true": True,
+    "frontier-v1-array-false": False,
+    "frontier-live-scale": "VERIFIED",
+}
+
 
 def _ancestors(start, parents, restrict=None):
     """Full ancestor set of `start` (optionally restricted to `restrict`)."""
@@ -570,9 +702,11 @@ def main():
     # kills the whole TS runner batch at JSON.parse. Fail loudly at
     # construction instead — non-finite numbers are out of the record domain
     # (see DESIGN.md §6).
-    cases_path.write_text(json.dumps(CASES, allow_nan=False))
+    cases_path.write_text(json.dumps(CASES + FRONTIER_CASES, allow_nan=False))
     print(f"harness: {len(CASES)} cases, "
-          f"{sum(len(c['probes']) for c in CASES)} checkpoint probes")
+          f"{sum(len(c['probes']) for c in CASES)} checkpoint probes "
+          f"+ {len(FRONTIER_CASES)} frontier cases, "
+          f"{sum(len(c['probes']) for c in FRONTIER_CASES)} frontier probes")
 
     proc = subprocess.run(
         ["node", str(HERE / "runner.ts"), str(cases_path), str(results_path)],
@@ -584,7 +718,10 @@ def main():
 
     ts_results = {r["name"]: r for r in json.loads(results_path.read_text())}
     divergences = []
-    for case in CASES:
+    frontier_deltas = 0
+
+    def check_case(case):
+        nonlocal frontier_deltas
         name = case["name"]
         exp_derive = derive([dict(r) for r in case["records"]])
         # Pass closureRoot through so v2 probes get the three-way result; probes
@@ -597,7 +734,7 @@ def main():
         got = ts_results.get(name)
         if got is None:
             divergences.append((name, "missing from TS results"))
-            continue
+            return
         if got["derive"] != exp_derive:
             divergences.append((name, "derive differs"))
             for field in ("state", "order", "conflicts", "orphans"):
@@ -636,6 +773,46 @@ def main():
                     (name, f"delta@{rid} != full derive"))
         if got.get("deltas") != exp_deltas:
             divergences.append((name, "delta derivation differs across ports"))
+        # FRONTIER DERIVATION: the case's AUTO frontier checkpoint (maximal
+        # applied records) must (a) cover exactly the applied set — the
+        # C == applied-set theorem — with the full derived state pinned,
+        # (b) delta-derive to the FULL derive byte-for-byte, and (c) be
+        # built identically by the TS port (members, root, coverage, delta).
+        fcp = ref.build_frontier_checkpoint([dict(r) for r in case["records"]])
+        got_f = got.get("frontier")
+        if fcp is None:
+            if got_f is not None:
+                divergences.append(
+                    (name, "frontier checkpoint: TS built one, referee none"))
+            return
+        if got_f is None:
+            divergences.append(
+                (name, "frontier checkpoint: referee built one, TS none"))
+            return
+        frontier_deltas += 1
+        if {r["id"] for r in fcp["closure"]} != set(exp_derive["order"]):
+            divergences.append(
+                (name, "frontier covered set != applied set"))
+        if fcp["state"] != exp_derive["state"]:
+            divergences.append(
+                (name, "frontier pinned state != full derived state"))
+        fclosure_ids = {r["id"] for r in fcp["closure"]}
+        ftail = [dict(r) for r in case["records"]
+                 if r.get("id") not in fclosure_ids]
+        exp_fd = ref.derive_delta(fcp, ftail)
+        if exp_fd != exp_derive:
+            divergences.append((name, "frontier delta != full derive"))
+        if (got_f.get("at") != fcp["at"]
+                or got_f.get("closureRoot") != fcp["closureRoot"]
+                or got_f.get("covered") != len(fcp["closure"])
+                or got_f.get("delta") != exp_fd):
+            divergences.append(
+                (name, "frontier checkpoint differs across ports"))
+
+    for case in CASES:
+        check_case(case)
+    for case in FRONTIER_CASES:
+        check_case(case)
 
     total_probes = sum(len(c["probes"]) for c in CASES)
     total_witnesses = sum(
@@ -682,6 +859,48 @@ def main():
                            if k in _c["probes"][0]})
             assert _got == _want, \
                 f"{_nm}: expected {_want}, referee gave {_got}"
+        # FRONTIER: pin the frozen poc-scale-1 frontier — four members
+        # covering 62/62, the root literal recomputed from the construction.
+        _scale = [dict(r) for r in _LIVE["poc-scale-1"]]
+        _fcp = ref.build_frontier_checkpoint(_scale)
+        assert _fcp is not None, "poc-scale-1 frontier checkpoint missing"
+        assert _fcp["at"] == ["t40", "t50", "t60", "witness-1"], \
+            f"poc-scale-1 frontier members: {_fcp['at']}"
+        assert len(_fcp["closure"]) == 62, \
+            f"poc-scale-1 frontier covers {len(_fcp['closure'])}, want 62"
+        assert _fcp["closureRoot"] == POC_SCALE1_FRONTIER_ROOT, \
+            f"poc-scale-1 frontier root changed: {_fcp['closureRoot']}"
+        assert ref.checkpoint_root(
+            _scale, ["t40", "t50", "t60",
+                      "witness-1"]) == POC_SCALE1_FRONTIER_ROOT
+        assert _fcp["state"] == derive(_scale)["state"]  # C == applied set
+        # FRONTIER verdict pins: the referee gives the PINNED answer for
+        # each semantic frontier case, not only cross-port agreement.
+        _fby_name = {c["name"]: c for c in FRONTIER_CASES}
+        for _nm, _want in FRONTIER_EXPECTED.items():
+            _c = _fby_name[_nm]
+            _got = verify([dict(r) for r in _c["records"]],
+                          {k: _c["probes"][0][k]
+                           for k in ("at", "state", "closureRoot")
+                           if k in _c["probes"][0]})
+            assert _got == _want, \
+                f"{_nm}: expected {_want}, referee gave {_got}"
+        # Singleton equivalence of the builders, over the whole corpus: an
+        # array of one builds EXACTLY the string-form checkpoint object,
+        # and a one-member list digests exactly the singleton root — the
+        # generalisation is a widening of the domain, not a new digest.
+        for _c in CASES:
+            _recs = [dict(r) for r in _c["records"]]
+            for _rid in derive(_recs)["order"]:
+                _single = ref.build_checkpoint([dict(r) for r in _recs], _rid)
+                if _single is None:
+                    continue
+                assert ref.build_frontier_checkpoint(
+                    [dict(r) for r in _recs], [_rid]) == _single, \
+                    f"singleton frontier != build_checkpoint in {_c['name']}@{_rid}"
+                assert ref.checkpoint_root([dict(r) for r in _recs], [_rid]) == \
+                    ref.checkpoint_root([dict(r) for r in _recs], _rid), \
+                    f"one-member root != singleton root in {_c['name']}@{_rid}"
     except AssertionError as e:
         print(f"\nPROPERTY FAILURE: {e}")
         return 1
@@ -694,6 +913,12 @@ def main():
           f"oracle+invariance {oracle_checks}, transport-pin {pin_checks}, "
           f"live-golden {golden_checks}, poc-quilt-1@task-c root "
           f"{POC_QUILT1_TASK_C_ROOT[:12]}… — all pass")
+    print(f"FRONTIER: {len(FRONTIER_CASES)}/{len(FRONTIER_CASES)} cases "
+          f"identical "
+          f"({sum(len(c['probes']) for c in FRONTIER_CASES)} verdict probes, "
+          f"{frontier_deltas} frontier delta-vs-full derivations over the "
+          f"whole corpus); poc-scale-1 frontier root "
+          f"{POC_SCALE1_FRONTIER_ROOT[:12]}… — all pass")
     return 0
 
 
