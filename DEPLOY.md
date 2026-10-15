@@ -16,9 +16,12 @@ src/fold.ts        the fold (derive + verifyCheckpoint), refereed port
 src/worker.ts      the front door (routes below)
 conformance/       proof the TS fold == the Python referee (referee/fold.py)
 wrangler.toml      deploy shape (reference form; actual deploy via API)
-deploy/            the exact upload metadata + multipart spec used
 .admin-key.local   the admin secret (mode 600, NEVER committed)
 ```
+
+The upload metadata and multipart spec used by the Deployment section
+are printed inline there — save them as `deploy/metadata.json` and
+`deploy/spec.json` locally; they are operator files, not source.
 
 ## Concepts in one paragraph
 
@@ -48,7 +51,11 @@ branches that never saw it — inheritance by construction.
 | `/api/repos/<name>` | DELETE | admin | delete repo |
 | `/api/debug/log?repo=` | GET | admin | raw binding `log()` passthrough |
 | `/api/last-event` | GET | admin | latest push-event envelope (KV `EVENTS`, key `last-push`) |
-| `/api/events` | POST | — | manual event ingest to the same KV key (observability) |
+
+There is no event-ingest route: the only writer of the KV `last-push`
+mirror is the Queue consumer, fed by Artifacts event subscriptions.
+(A public `POST /api/events` existed in the demo build and was removed
+in the production pass — finding F2.)
 
 Admin auth: header `X-Admin-Key` must equal the `ADMIN_KEY` Worker
 secret. Fails closed (401) when the secret is unset or the header is
@@ -66,31 +73,117 @@ queue + consumer + one subscription
 (`artifacts.repo` source for `poc-quilt-1--task-e`, `events:["pushed"]`)
 were all created via the API and proven live: a witness record pushed
 from a fleet machine appeared in KV ~5 s later, and in `/api/state`
-immediately.
+immediately. Step 6 of the Deployment section is the exact recipe.
 
 **Freshness model:** the projection is a pure function of the
 record, derived fresh on every request. Events are observability and
 a future optimisation path — never a correctness dependency. There
 is no cache to invalidate.
 
-## Deployment (as performed; reproducible)
+## Authentication (read this first)
 
-1. Bundle: `bun build src/worker.ts --outfile dist/worker.js --format=esm --target=browser`
-2. Create KV namespace `GITPP_EVENTS` (id in wrangler.toml).
+Every step of the deployment is a Cloudflare API call, and the cold
+operator's first wall is auth, so it comes before the steps. Two
+routes exist; the deployment below uses the first.
+
+1. **API token (the canonical route).** Create a token in the
+   Cloudflare dashboard (My Profile → API Tokens → Create Token)
+   scoped to the account you are deploying to, with account-level
+   **Workers Scripts: Edit**, **Workers KV Storage: Edit**, and
+   **Queues: Edit**. Send it on every call as the header
+   `Authorization: Bearer <token>`. The commands below are written
+   with this project's `cf_api.py` helper (`cf_api.py VERB
+   /client/v4/...`), which attaches the stored credential for you;
+   with `curl`, expand each one to the same path under
+   `https://api.cloudflare.com/client/v4` with the header
+   `-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"` and the same
+   body.
+2. **wrangler.** `wrangler login` (OAuth in a browser) or the
+   `CLOUDFLARE_API_TOKEN` environment variable. Only the appendix
+   path needs it.
+
+Two things that bite:
+
+- **The account id is a variable, not a constant.** Every path below
+  contains `$CF_ACCOUNT_ID` — set it to your own account's id, found
+  in the dashboard (Workers & Pages → Overview, "Account ID" in the
+  right-hand sidebar), via `cf_api.py GET /client/v4/accounts` (the
+  `id` field of your account), or via `wrangler whoami`.
+- **No credentials at all does not say "unauthorized" — it says
+  9106/9107.** An unauthenticated API call returns errors
+  `9106 Missing X-Auth-Email header` and
+  `9107 Missing X-Auth-Key header`. Those headers belong to the
+  legacy Global API Key route; a Bearer token replaces both. If you
+  see 9106/9107, your token header never left the machine.
+
+## Deployment (the canonical path — Cloudflare API, as performed)
+
+Set `$CF_ACCOUNT_ID` first (see Authentication). Requires a Workers
+Paid account (Artifacts is not on the free plan) and `bun` for the
+bundle.
+
+1. Bundle:
+   `bun build src/worker.ts --outfile dist/worker.js --format=esm --target=browser`
+2. Create the KV namespace the event mirror lives in:
+   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces '{"title":"GITPP_EVENTS"}'`
+   Take `result.id` from the response — it is `<kv-id>` in step 3 and
+   the `id` in `wrangler.toml`'s `[[kv_namespaces]]` block.
 3. Multipart-upload the script with **all bindings declared in the
-   upload metadata from the start** (artifacts + KV):
-   a multipart PUT to `/client/v4/accounts/<acct>/workers/scripts/gitpp` with the script body and ALL bindings declared in the metadata (bindings omitted from an upload are wiped), or `wrangler deploy`
-   (Never upload without bindings metadata — it wipes non-secret
-   bindings. No existing Worker is touched by any of this.)
-4. Enable workers.dev: POST `.../scripts/gitpp/subdomain {"enabled":true}`
-5. Set the secret LAST: PUT `.../scripts/gitpp/secrets`
-   `{"name":"ADMIN_KEY","text":<value>,"type":"secret_text"}`
-   (re-set it after any later re-upload).
-6. Events: create queue `gitpp-events`; POST consumer
-   `{"type":"worker","script_name":"gitpp"}`; POST subscription to
-   `/event_subscriptions/subscriptions` (payload: source `artifacts.repo`, event `cf.artifacts.repo.pushed`).
+   upload metadata from the start** (bindings omitted from an upload
+   are wiped; only `secret_text` bindings survive one). Write
+   `deploy/metadata.json`:
+   ```json
+   {"main_module":"worker.js","compatibility_date":"2025-09-01","bindings":[{"type":"artifacts","name":"ARTIFACTS","namespace":"default"},{"type":"kv_namespace","name":"EVENTS","namespace_id":"<kv-id>"}]}
+   ```
+   and `deploy/spec.json` (paths are relative to where you run the
+   command):
+   ```json
+   {"files":{"metadata":{"path":"deploy/metadata.json","ctype":"application/json"},"worker.js":{"path":"dist/worker.js","ctype":"application/javascript+module","filename":"worker.js"}}}
+   ```
+   then upload:
+   `cf_api.py PUTM /client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp deploy/spec.json`
+4. Enable workers.dev:
+   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp/subdomain '{"enabled":true}'`
+5. Set the secret LAST, and re-set it after any later re-upload. The
+   payload is a **single JSON object** — the array form `[{...}]` is
+   rejected by this endpoint (learned on the production deploy).
+   Write it to a mode-600 file so the value stays out of shell
+   history:
+   ```json
+   {"name":"ADMIN_KEY","text":"<value>","type":"secret_text"}
+   ```
+   `cf_api.py PUT /client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/gitpp/secrets @secret.json`
+6. Events — create the queue, register this Worker as its consumer,
+   then subscribe:
+   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/queues '{"name":"gitpp-events"}'`
+   → take `result.queue_id` as `<queue-id>`.
+   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/queues/<queue-id>/consumers '{"type":"worker","script_name":"gitpp"}'`
+   `cf_api.py POST /client/v4/accounts/$CF_ACCOUNT_ID/event_subscriptions/subscriptions '<body>'`
+   with body (one subscription per repo whose pushes you want
+   mirrored):
+   ```json
+   {"name":"gitpp-<repo>-pushes","enabled":true,"source":{"type":"artifacts.repo","namespace":"default","repo_name":"<repo>"},"destination":{"type":"queues.queue","queue_id":"<queue-id>"},"events":["pushed"]}
+   ```
+   Two naming lessons, learned from API validation errors: the event
+   name in `events` is `pushed` — `cf.artifacts.repo.pushed` is the
+   envelope type that arrives, not what you subscribe with — and
+   source properties are snake_case.
 
-`wrangler.toml` carries the equivalent CLI configuration.
+## Appendix — the wrangler equivalent (not the path used in production)
+
+`wrangler.toml` carries the equivalent CLI configuration, for an
+operator who prefers the CLI:
+
+- KV: `wrangler kv namespace create GITPP_EVENTS` — current syntax
+  is space-separated; the v1 colon form (`wrangler kv:namespace
+  create`) no longer exists. Put the printed id in `wrangler.toml`.
+- Queue: `wrangler queues create gitpp-events`; the consumer is the
+  `[[queues.consumers]]` block already in `wrangler.toml`.
+- Deploy: `wrangler deploy` (its `main` already points at the
+  step-1 bundle, `dist/worker.js`).
+- Secret: `wrangler secret put ADMIN_KEY`.
+- The event subscription has no wrangler form — create it with the
+  step-6 API call whichever deploy path you took.
 
 ### Delta reads (checkpoint + tail)
 

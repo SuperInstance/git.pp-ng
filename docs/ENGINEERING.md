@@ -240,6 +240,27 @@ suspected mechanism is a chunked-transfer / connection-reuse interaction between
 Operator guidance: page large listings, or fetch via `curl`; the Worker response
 itself is well-formed (curl and browsers read it whole).
 
+**Public derivation cost (the honest price of the public face).** The read
+routes are public by design, and a state read is not free: every
+`GET /api/state` runs the full collection + fold for its project, and no
+route authenticates or throttles the caller. The measured shape at the
+62-record scale project: **126 binding calls** per read (2 list + 61 get +
+1 log + 62 readFile) and **2.9–5.7 s** live latency, almost all of it
+collection — an unauthenticated caller can amplify that cost at will, and
+the namespace's 5,000-repo ceiling (drop site #6) bounds the worst case
+only loosely. Mitigations, as they land: the bounded-concurrency
+collection above took the read from ~14 s warm / ~31 s cold sequential to
+the 2.9–5.7 s band; the bitset ancestry engine (PR #14) removed the fold
+as the scaling term — a 5,000-record derive fell from 2,712 ms / 1,266 MB
+peak RSS to 110 ms / 117.5 MB — leaving the collection reads as the
+remaining cost; checkpoint+tail derivation (in flight) starts from the
+newest verified checkpoint and folds only the tail, which cuts the
+collection itself. Deliberately not done: response caching. The
+projection is derived fresh on every request by doctrine — a cached
+projection is a stale projection, and staleness here is a correctness bug,
+not a performance feature. If throttling is ever needed it belongs at the
+edge in front of the Worker, not as a cache inside it.
+
 ---
 
 ## Part 3 — gated-routes & `DEPLOY.md` security claims, line by line
@@ -248,13 +269,13 @@ Each claim in `DEPLOY.md` checked against `src/worker.ts`:
 
 | Claim (DEPLOY.md) | Code | Verdict |
 |---|---|---|
-| "`X-Admin-Key` must equal the `ADMIN_KEY` secret" | `authed()`: `provided !== null && provided === env.ADMIN_KEY` | **True.** |
+| "`X-Admin-Key` must equal the `ADMIN_KEY` secret" | `authed()`: `provided !== null && provided === env.ADMIN_KEY` | **True** at audit time; production pass compares via the constant-time `keyEq()` (F1). |
 | "Fails closed (401) when the secret is unset" | `authed()`: `if (!env.ADMIN_KEY) return false` | **True** — unset secret denies every gated route. |
 | "…or the header is wrong" | `gated()` returns `json({error:"unauthorized"}, 401)` when `!authed` | **True.** |
 | "create/fork responses never carry repo tokens" | `publicMeta()` destructures `{ token: _token, ...rest }` | **True for the top-level token** the binding returns. Finding F3 below: it strips only the top level. |
 | "`/api/repos/<name>/token` → `{plaintext, expiresAt}`" | `handleToken` returns the minted token | **True, and intended** — this is the one route that returns a token, and it is admin-gated. |
-| Routes table auth column (GET `/`, `/api/state`, `/api/repos` public; POST/DELETE/token/debug/last-event admin; POST `/api/events` public) | router in `fetch` | **Matches exactly.** |
-| "nothing mutates without the key" | all of `create`/`fork`/`delete`/`token` under `gated()` | **True** for repo mutation. Finding F2: `/api/events` is an unauthenticated write to one KV key. |
+| Routes table auth column (GET `/`, `/api/state`, `/api/repos` public; POST/DELETE/token/debug/last-event admin; POST `/api/events` public) | router in `fetch` | **Matched exactly** at audit time. Production pass: the `/api/events` route no longer exists, so every mutating route is now admin-gated. |
+| "nothing mutates without the key" | all of `create`/`fork`/`delete`/`token` under `gated()` | **True.** (Was: true for repo mutation, with F2's `/api/events` an unauthenticated write to one KV key — route removed in the production pass, below.) |
 
 **Findings**
 
@@ -263,14 +284,62 @@ Each claim in `DEPLOY.md` checked against `src/worker.ts`:
   in principle; negligible over the public internet against a high-entropy secret,
   but a hardened build would use a constant-time compare. Not fixed (behaviour
   change to a security primitive, out of this pass's scope); named.
+  **Fixed in the production pass (2026-10-14):** `authed()` now compares via
+  `keyEq()`, a constant-time scan that folds in the length difference.
 - **F2 (low, by design) — public `POST /api/events`.** Unauthenticated; writes
   one KV key (`last-push`). Bounded (one key, overwrite), observability-only, and
   derivation never reads it, so it cannot affect state — but it is a public write
   and could be spammed. Documented as an accepted demo trade-off.
+  **Fixed in the production pass (2026-10-14):** the route and its handler are
+  removed entirely (no tree caller existed — scene/tests never used it). The
+  only writer of `last-push` is now the Queue consumer. `POST /api/events`
+  answers 404; `GET /api/last-event` is unchanged.
 - **F3 (informational) — `publicMeta` strips only the top-level `token`.** The
   Artifacts binding returns the token at the top level, so this is correct today;
   a nested token field in a future binding shape would not be stripped. Named for
   the next binding upgrade.
+  **Fixed in the production pass (2026-10-14):** `publicMeta` is now a deep
+  scrub (credential-shaped keys removed at every depth), and the public
+  `GET /api/repos` list — which previously returned raw binding metadata —
+  goes through the same scrub. Output is byte-identical for today's binding
+  shapes (live list items carry no credential keys).
+
+**Production pass (2026-10-14) — further findings, all fixed, all pinned by
+`tests/security-probes.mjs` (18 probes, mock-binding, before/after):**
+
+- **P1 (medium) — the router's try/catch never caught async errors.**
+  Dispatch returned handler promises un-awaited, so any binding rejection
+  during a request escaped as an uncontrolled runtime 500; the catch only
+  ever saw synchronous throws — and answered those with `err.message` in
+  the body, leaking internals. Fix: every dispatch is awaited inside the
+  try; the catch answers a bare `{error:"internal"}` and logs server-side.
+- **P2 (low) — unvalidated path parameters.** `fork`/`delete`/`token`
+  names were `decodeURIComponent`'d unchecked: malformed encodings threw
+  (500), and traversal-shaped names (`../evil`) reached the binding
+  verbatim. Fix: `pathName()` (defensive decode + the create route's
+  NAME_RE) inside the gate; bad names are a clean 400 and the binding is
+  never touched. The debug route's `?repo=` is validated the same way.
+- **P3 (low) — read routes accepted any `?project=`.** Garbage names
+  derived over an empty collection (200, no crash, no leak — but not a
+  contract a production surface should keep). Fix: the three read routes
+  validate via the same NAME_RE (absent = default project, malformed =
+  400). Valid names are byte-identical, verified against the golden.
+- **P4 (low) — token route took any `ttl`.** Negative or astronomical
+  values were passed to `createToken`. Fix: `ttl` must be a positive
+  finite number of seconds, max 30 days; `scope` a short string.
+  `pp.py`'s own values (read/write, operator-chosen seconds) are
+  unaffected.
+
+Probed and clean in the same pass (no change): a key supplied only in the
+query string never authenticates (header-only, verified live and in
+probes); no key/wrong key fail closed on every gated route, and the gate
+runs before any input is processed; `GET /api/repos` pagination
+parameters are not consumed at all (internal 50-page cap), so fuzzing
+them is inert; record ingest stays defensive (unparseable records are
+skipped, never fatal); the HTML projection escapes every interpolated
+value; nothing in the Worker logs secrets (there is no logging of
+request data at all — the one `console.error` added by P1 logs the
+server-side exception object only, never request material).
 
 No high- or critical-severity findings in the gated routes.
 
@@ -283,8 +352,10 @@ No high- or critical-severity findings in the gated routes.
 | Critical | 1 | Checkpoint forgery/accept split in `verify_checkpoint` (ADDENDUM #4 P1) — **fixed**, pinned by `ckpt-bigint-domain` |
 | High | 2 | Ancestry-reduction winner flip (ADDENDUM #3) — **fixed**; cross-port id-order split (ADDENDUM #1) — **fixed** |
 | Medium | 2 | Numeric-domain conflict split (ADDENDUM #4 P3) — **fixed**; collection latency O(reads) sequential (ADDENDUM #2) — **fixed** |
-| Low | 4 | Non-constant-time admin compare (F1) — named; public `/api/events` write (F2) — documented; divergent-dup silent drop (collection #4) — **surfaced**; harness `allow_nan` crash (ADDENDUM #4 P4) — **fixed** |
-| Informational | 3 | dead `depth` map (py) — **removed**; `publicMeta` top-level strip (F3) — named; `listAllRepos` 5,000-repo ceiling — documented |
+| Low | 4 | Non-constant-time admin compare (F1) — **fixed** (production pass); public `/api/events` write (F2) — **fixed** (route removed, production pass); divergent-dup silent drop (collection #4) — **surfaced**; harness `allow_nan` crash (ADDENDUM #4 P4) — **fixed** |
+| Medium (production pass) | 1 | Router try/catch never caught async rejections; sync throws leaked `err.message` (P1) — **fixed**, probe-pinned |
+| Low (production pass) | 3 | Unvalidated path params (P2), unvalidated `?project=` (P3), unvalidated token `ttl` (P4) — **fixed**, probe-pinned |
+| Informational | 3 | dead `depth` map (py) — **removed**; `publicMeta` top-level strip (F3) — **fixed** (deep scrub, production pass); `listAllRepos` 5,000-repo ceiling — documented |
 
 Everything marked **fixed/surfaced/removed** is on this branch with a conformance
 or integration case that proves it; everything **named/documented** is left as-is

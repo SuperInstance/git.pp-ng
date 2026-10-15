@@ -16,6 +16,14 @@
 - **Conflicts**: A list of keys for which conflicting values were detected.
 - **Orphans**: Records excluded from derivation because a parent is missing from the record set, or because they are blocked behind such a record or a parent cycle.
 
+### Collection (Worker layer)
+
+The contract above starts at the record set; the Worker gathers that set per project as follows:
+
+- The project repo's commits are enumerated in the binding's `log()` order, one `record.json` read per commit; then each task repo's `record.json` at HEAD, task repos in sorted name order.
+- Records are deduped by `id`, **first-seen wins**: the first copy collected is the one the fold sees.
+- A later copy with the same `id` but different content — a divergent duplicate — is dropped and surfaced in `collectionWarnings` (`{id, keptFrom, droppedFrom}`) on `/api/records`, never silently. This holds across repos and **within a single repo**: if two commits of one repo carry the same id with different content, the copy first in the binding's log order is kept, and the dropped copy is warned with `keptFrom` and `droppedFrom` naming that same repo.
+
 ### VerifyCheckpoint Semantics
 - `verify_checkpoint(records, checkpoint)` performs exactly one check, and it is the strong one: it re-derives state from exactly the ancestors of the record named in `checkpoint["at"]` and returns true only if that derived state equals the checkpoint's claimed state. A checkpoint that summarises anything else — a superset, a subset, a tampered value — fails. Checkpoints are therefore legal only when provenance-stamped: they name the record position they summarise and are reproducible from it.
 - **Relative to the record set.** The closure of `at` is computed over the records passed in, so verification is a statement about *this* record set. A later-arriving ancestor of `at` grows that closure and can change what `at` verifies to — honest behaviour (the past was genuinely incomplete before), but it means a checkpoint is only as pinned as the set it is checked against. Binding a checkpoint to the exact closure root it was taken over (a closure-root hash) so a grown closure is detectable is **checkpoint v2**, implemented as a spike (see §6 and `docs/CHECKPOINT-V2.md`): verification then reports VERIFIED, STATE-ONLY, or MISMATCH instead of a bare bool.
@@ -48,8 +56,9 @@
        3. **Smallest id**: if still tied, the lexicographically (code-point) smallest `id`.
 
 5. **Conflict Detection**:
+   - A **candidate** for a key is every record in the set whose `effects` set that key — tasks, witnesses, and overrides alike. Candidacy is about setting the key, not about being able to win it: only the candidates of the highest class present compete to win (step 4), but every setter is a candidate for labelling.
    - If, after resolution, there are two or more distinct values for a key, a conflict is emitted.
-   - The losers are all candidates except the winner, which is the value chosen by the resolution algorithm.
+   - The losers are all candidates except the winner, which is the value chosen by the resolution algorithm. A displaced witness is therefore named a loser, never silently dropped: in corpus case `prop-base`, witness `w` sets `y` to 99 against task `b`'s 2, and the emitted conflict is `{key: "y", winner: "b", losers: ["w"]}`.
 
 ## 3. Determinism Argument
 
@@ -62,7 +71,7 @@ Every step of the algorithm is a function of the record set only:
 ## 4. Witness-Absolute vs. Ancestry-First Reading
 
 ### Witness-Absolute Reading (implemented)
-- Class precedence is absolute: an `override` outranks a `task`, a `task` outranks a `witness` — even when the witness is a *descendant* of the task. An observation can never displace a completion on a contested key, no matter how recent. "Seen by us" does not overwrite "done by us"; changing a completed value takes a task, or an override that cites the witness.
+- Class precedence is absolute: an `override` outranks a `task`, a `task` outranks a `witness` — even when the witness is a *descendant* of the task. An observation can never displace a completion on a contested key, no matter how recent. "Seen by us" does not overwrite "done by us"; changing a completed value takes a task, or an override that cites the witness. Never winning is not never being labelled, though: the witness remains a candidate under §2 step 5, so on a contested key it is named a conflict loser — precedence decides who wins, not whose value counts as a conflict.
 - Uncontested witness observations DO reach the state — that is their purpose: ambient truth (a disk at 93%, a load average) is part of the derived picture, labelled by kind.
 
 ### Ancestry-First Reading (the alternative)

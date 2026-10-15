@@ -25,6 +25,11 @@ Refusals (checked before anything is pushed — the fold is unchanged):
     with --kind witness.)
   * an empty-parents (genesis) record is refused unless --genesis is passed
     AND the project has no records yet; the error names the current frontier.
+  * an override that rules on a key no record in its ancestor closure set
+    or observed is refused: an override is a ruling, not an invention — you
+    cannot rule on a key your lineage never touched. The error names the
+    ungrounded key(s); the fix is to descend from a record that set/observed
+    the key, or to record a witness first and let the human rule.
   * a witness carrying non-observation effect keys is warned (stderr), never
     refused — a witness reporting measured state (env.*) is legal.
   pp.py state <project>                      derived state + conflicts
@@ -426,6 +431,60 @@ def empty_effects_refusal(record):
             "not filed. Record an observation with --kind witness.")
 
 
+def ancestor_closure_keys(record, records):
+    """Effect keys set by the record's ancestor closure: every record
+    reachable from the record's parents by following parent links, the
+    parents themselves included. An unknown parent id contributes nothing
+    (and would orphan the record in the fold anyway)."""
+    by_id = {}
+    for r in records:
+        rid = r.get("id")
+        if rid and rid not in by_id:
+            by_id[rid] = r
+    keys = set()
+    seen = set()
+    stack = list(record.get("parents") or [])
+    while stack:
+        rid = stack.pop()
+        if rid in seen:
+            continue
+        seen.add(rid)
+        r = by_id.get(rid)
+        if r is None:
+            continue
+        for k in (r.get("effects") or {}):
+            keys.add(str(k))
+        stack.extend(r.get("parents") or [])
+    return keys
+
+
+def override_grounding_refusal(record, records):
+    """None if the record may proceed; else a teaching refusal message.
+    An override is a RULING: it may only change keys its ancestry already
+    set or observed. An override ruling on a key no ancestor touched is
+    inventing state from nowhere — the M3 failure shape, in which a bare
+    observation ('disk is at 94%') was drafted as an override inventing a
+    config value no record in its lineage had ever set. Only kind ==
+    'override' is checked: tasks ORIGINATE keys — that is their job — and
+    witnesses report, they do not rule."""
+    if record.get("kind") != "override":
+        return None
+    eff = record.get("effects")
+    if not isinstance(eff, dict) or not eff:
+        return None
+    grounded = ancestor_closure_keys(record, records)
+    ungrounded = sorted(str(k) for k in eff if str(k) not in grounded)
+    if not ungrounded:
+        return None
+    return (
+        "ungrounded override: an override is a ruling, not an invention — "
+        "it may only change keys its ancestry set or observed, and no record "
+        f"in this override's ancestry set or observed: {', '.join(ungrounded)}. "
+        "Fix: descend from a record that set or observed the key (add it to "
+        "--parents), or record the observation as a witness first "
+        "(--kind witness) and let your human rule on it.")
+
+
 def _project_of(repo):
     """The project a repo belongs to: the part before the first '--'."""
     return repo.split("--", 1)[0]
@@ -484,6 +543,7 @@ def cmd_complete(args):
         print(f"pp: warning: {line}", file=sys.stderr)
     # 4. Genesis guard: a root record (empty parents) needs --genesis AND an
     #    empty project. Only queries the Worker when parents are empty.
+    existing = None
     if not parents:
         project = _project_of(args.repo)
         existing = project_records(project)
@@ -491,6 +551,15 @@ def cmd_complete(args):
                                _frontier_ids(existing))
         if msg:
             die(msg)
+    # 5. Override grounding: an override may only rule on keys its ancestry
+    #    set or observed. Queries the Worker for the project's records (the
+    #    read is public; the refusal still fires before any token or push).
+    if args.kind == "override":
+        if existing is None:
+            existing = project_records(_project_of(args.repo))
+        msg = override_grounding_refusal(record, existing)
+        if msg:
+            die(f"refusing to push {args.id}: {msg}")
 
     token = mint_token(args.repo, "write")
     tmp = tempfile.mkdtemp(prefix="pp-complete-")

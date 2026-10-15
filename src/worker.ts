@@ -73,6 +73,11 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 // helpers
 // ---------------------------------------------------------------------------
 
+// Every response this Worker sends is built by json() or html() below —
+// the single response-construction layer — so the baseline security
+// headers (gauntlet M5 salvage: they were verified absent) cannot be
+// missed by any route. `extraHeaders` carries route-specific observability
+// headers (e.g. x-gitpp-derivation) without bypassing that layer.
 function json(
   data: unknown,
   status = 200,
@@ -80,7 +85,23 @@ function json(
 ): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", ...(extraHeaders ?? {}) },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      ...(extraHeaders ?? {}),
+    },
+  });
+}
+
+function html(body: string, extraHeaders?: { [k: string]: string }): Response {
+  return new Response(body, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+      "x-frame-options": "DENY",
+      ...(extraHeaders ?? {}),
+    },
   });
 }
 
@@ -98,10 +119,54 @@ function display(v: unknown): string {
   return JSON.stringify(v) ?? String(v);
 }
 
+/** Constant-time string equality (F1): always scans the longer length and
+ * folds the length difference in, so the comparison does not short-circuit
+ * on the first differing byte. Best-effort in JS (the JIT makes no hard
+ * guarantees), but strictly better than `===` on a secret. */
+function keyEq(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0;
+    const cb = i < b.length ? b.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
+  }
+  return diff === 0;
+}
+
 function authed(request: Request, env: Env): boolean {
   if (!env.ADMIN_KEY) return false; // fail closed if the secret is unset
   const provided = request.headers.get("x-admin-key");
-  return provided !== null && provided === env.ADMIN_KEY;
+  return provided !== null && keyEq(provided, env.ADMIN_KEY);
+}
+
+/** The `?project=` parameter of the read routes: absent means the default
+ * project; present means it must be a well-formed name (same shape the
+ * create route enforces), or the request is a clean 400 — never a derive
+ * over a garbage name. */
+function projectParam(
+  url: URL,
+): { project: string } | { response: Response } {
+  const p = url.searchParams.get("project");
+  if (p === null) return { project: DEFAULT_PROJECT };
+  if (!NAME_RE.test(p)) {
+    return { response: json({ error: "invalid project name" }, 400) };
+  }
+  return { project: p };
+}
+
+/** A repo name taken from a URL path segment: percent-decoded defensively
+ * (malformed encodings are a 400, never a 500) and held to the same shape
+ * as the create route, so traversal-shaped strings never reach the
+ * binding. Returns null when the segment is not a well-formed name. */
+function pathName(segment: string): string | null {
+  let name: string;
+  try {
+    name = decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+  return NAME_RE.test(name) ? name : null;
 }
 
 function pageItems(page: unknown): unknown[] {
@@ -699,8 +764,9 @@ ${orphanItems}
 
 async function handleState(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const project = url.searchParams.get("project") ?? DEFAULT_PROJECT;
-  const { out, derivedVia } = await projectDerivation(env, project);
+  const pp = projectParam(url);
+  if ("response" in pp) return pp.response;
+  const { out, derivedVia } = await projectDerivation(env, pp.project);
   // The JSON body is exactly derive()'s output (byte-identical to the full
   // fold); how it was derived is surfaced in a header only, for observability.
   return json(out, 200, { "x-gitpp-derivation": derivedVia });
@@ -708,24 +774,22 @@ async function handleState(request: Request, env: Env): Promise<Response> {
 
 async function handleRoot(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const project = url.searchParams.get("project") ?? DEFAULT_PROJECT;
+  const pp = projectParam(url);
+  if ("response" in pp) return pp.response;
+  const project = pp.project;
   const { out, records, recordCount, repos, origin, derivedVia } =
     await projectDerivation(env, project);
   const recordsView = buildRecordsView(records, out, origin, witnessFreshness(records));
-  return new Response(
-    renderProjection(project, out, recordCount, repos, recordsView),
-    {
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "x-gitpp-derivation": derivedVia,
-      },
-    },
-  );
+  return html(renderProjection(project, out, recordCount, repos, recordsView), {
+    "x-gitpp-derivation": derivedVia,
+  });
 }
 
 async function handleRecords(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const project = url.searchParams.get("project") ?? DEFAULT_PROJECT;
+  const pp = projectParam(url);
+  if ("response" in pp) return pp.response;
+  const project = pp.project;
   const { out, records, repos, origin, warnings, derivedVia } =
     await projectDerivation(env, project);
   const view = buildRecordsView(records, out, origin, witnessFreshness(records));
@@ -744,7 +808,10 @@ async function handleRecords(request: Request, env: Env): Promise<Response> {
 
 async function handleListRepos(env: Env): Promise<Response> {
   const repos = await listAllRepos(env);
-  return json({ repos, count: repos.length });
+  // Public route: the raw binding metadata goes through the same credential
+  // scrub as create/fork responses, so no token-shaped field can ever ride
+  // along if the binding's list shape grows one.
+  return json({ repos: repos.map((r) => publicMeta(r)), count: repos.length });
 }
 
 async function readJsonBody(
@@ -761,9 +828,28 @@ async function readJsonBody(
   }
 }
 
+const SECRET_KEY_RE = /token|secret|password|credential|api[-_]?key/i;
+
+/** Deep-scrub a binding metadata object before it leaves the Worker (F3):
+ * keys that look like credentials are removed at EVERY depth, not just the
+ * top level, so a future binding shape cannot smuggle a token into a
+ * response. Field order and all non-secret values are preserved, so for
+ * the binding shapes that exist today the output is byte-identical. */
+function scrubMeta(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(scrubMeta);
+  if (value && typeof value === "object") {
+    const out: { [k: string]: unknown } = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (SECRET_KEY_RE.test(k)) continue;
+      out[k] = scrubMeta(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 function publicMeta(meta: RepoMeta): { [k: string]: unknown } {
-  const { token: _token, ...rest } = meta ?? {};
-  return rest;
+  return scrubMeta(meta ?? {}) as { [k: string]: unknown };
 }
 
 async function handleCreateRepo(request: Request, env: Env): Promise<Response> {
@@ -772,10 +858,23 @@ async function handleCreateRepo(request: Request, env: Env): Promise<Response> {
   if (typeof name !== "string" || !NAME_RE.test(name)) {
     return json({ error: "body {name} required, [A-Za-z0-9._-], max 100" }, 400);
   }
-  const meta = await env.ARTIFACTS.create(name, {
-    setDefaultBranch: "main",
-    description: typeof body?.description === "string" ? body.description : undefined,
-  });
+  let meta: RepoMeta;
+  try {
+    meta = await env.ARTIFACTS.create(name, {
+      setDefaultBranch: "main",
+      description: typeof body?.description === "string" ? body.description : undefined,
+    });
+  } catch (err) {
+    // A duplicate name is a client conflict, not a Worker fault: the
+    // binding rejects it, and that rejection answers 409 with a stable
+    // body instead of escaping as a 500. Any other binding failure
+    // rethrows and surfaces as the bare 500.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/already exists/i.test(msg)) {
+      return json({ error: "repo already exists", name }, 409);
+    }
+    throw err;
+  }
   return json({ created: publicMeta(meta) }, 201);
 }
 
@@ -800,6 +899,26 @@ async function handleToken(
   repoName: string,
 ): Promise<Response> {
   const body = (await readJsonBody(request)) ?? {};
+  if (
+    body.scope !== undefined &&
+    (typeof body.scope !== "string" ||
+      body.scope.length === 0 ||
+      body.scope.length > 32)
+  ) {
+    return json({ error: "scope must be a short string" }, 400);
+  }
+  if (
+    body.ttl !== undefined &&
+    (typeof body.ttl !== "number" ||
+      !Number.isFinite(body.ttl) ||
+      body.ttl <= 0 ||
+      body.ttl > 30 * 24 * 3600)
+  ) {
+    return json(
+      { error: "ttl must be a positive number of seconds (max 30 days)" },
+      400,
+    );
+  }
   const scope = typeof body.scope === "string" ? body.scope : "write";
   const ttl = typeof body.ttl === "number" ? body.ttl : undefined;
   const repo = await env.ARTIFACTS.get(repoName);
@@ -817,6 +936,9 @@ async function handleDebugLog(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const repoName = url.searchParams.get("repo");
   if (!repoName) return json({ error: "pass ?repo=<name>" }, 400);
+  if (!NAME_RE.test(repoName)) {
+    return json({ error: "invalid repo name" }, 400);
+  }
   const repo = await env.ARTIFACTS.get(repoName);
   const log = await repo.log({
     ref: url.searchParams.get("ref") ?? "main",
@@ -831,30 +953,13 @@ async function handleLastEvent(env: Env): Promise<Response> {
   return json({ lastPush: raw ? JSON.parse(raw) : null });
 }
 
-/** Manual event ingest (observability only — the production event path
- * is the queue consumer below; event subscriptions deliver to a Queue,
- * not to a fetch route). Records the raw envelope in KV. Derivation
- * never depends on events: /api/state re-derives from the record on
- * every request. */
-async function handleEvent(request: Request, env: Env): Promise<Response> {
-  if (!env.EVENTS) return json({ error: "EVENTS KV not bound" }, 501);
-  let envelope: unknown = null;
-  try {
-    envelope = await request.json();
-  } catch {
-    return json({ error: "invalid JSON" }, 400);
-  }
-  const record = {
-    receivedAt: new Date().toISOString(),
-    headers: {
-      eventType: request.headers.get("cf-event-type"),
-      eventSource: request.headers.get("cf-event-source"),
-    },
-    envelope,
-  };
-  await env.EVENTS.put("last-push", JSON.stringify(record));
-  return json({ recorded: true });
-}
+/* There is deliberately NO fetch route for event ingest (finding F2,
+ * closed in the production pass): the only writer of the KV last-push
+ * mirror is the Queue consumer below, fed by Artifacts event
+ * subscriptions. A public POST /api/events used to let anyone forge a
+ * push envelope into that mirror; the route is removed, not gated, so
+ * the write surface is exactly the subscription path. Derivation never
+ * depended on events in the first place. */
 
 // ---------------------------------------------------------------------------
 // router + queue consumer
@@ -899,16 +1004,20 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
+    // Every dispatch is awaited inside the try: returning a handler's
+    // promise un-awaited would let its rejection escape this catch and
+    // surface as an uncontrolled runtime 500 instead of the clean body
+    // below (and synchronous throws used to leak err.message with it).
     try {
-      if (method === "GET" && path === "/") return handleRoot(request, env);
+      if (method === "GET" && path === "/") return await handleRoot(request, env);
       if (method === "GET" && path === "/api/state") {
-        return handleState(request, env);
+        return await handleState(request, env);
       }
       if (method === "GET" && path === "/api/records") {
-        return handleRecords(request, env);
+        return await handleRecords(request, env);
       }
       if (method === "GET" && path === "/api/repos") {
-        return handleListRepos(env);
+        return await handleListRepos(env);
       }
 
       const gated = (fn: () => Promise<Response>): Promise<Response> =>
@@ -917,42 +1026,48 @@ export default {
           : Promise.resolve(json({ error: "unauthorized" }, 401));
 
       if (method === "POST" && path === "/api/repos") {
-        return gated(() => handleCreateRepo(request, env));
+        return await gated(() => handleCreateRepo(request, env));
       }
       const forkMatch = path.match(/^\/api\/repos\/([^/]+)\/fork$/);
       if (method === "POST" && forkMatch) {
-        return gated(() =>
-          handleForkRepo(request, env, decodeURIComponent(forkMatch[1])),
-        );
+        return await gated(async () => {
+          const source = pathName(forkMatch[1]);
+          return source === null
+            ? json({ error: "invalid repo name" }, 400)
+            : handleForkRepo(request, env, source);
+        });
       }
       const deleteMatch = path.match(/^\/api\/repos\/([^/]+)$/);
       if (method === "DELETE" && deleteMatch) {
-        return gated(() =>
-          handleDeleteRepo(env, decodeURIComponent(deleteMatch[1])),
-        );
+        return await gated(async () => {
+          const name = pathName(deleteMatch[1]);
+          return name === null
+            ? json({ error: "invalid repo name" }, 400)
+            : handleDeleteRepo(env, name);
+        });
       }
       const tokenMatch = path.match(/^\/api\/repos\/([^/]+)\/token$/);
       if (method === "POST" && tokenMatch) {
-        return gated(() =>
-          handleToken(request, env, decodeURIComponent(tokenMatch[1])),
-        );
+        return await gated(async () => {
+          const name = pathName(tokenMatch[1]);
+          return name === null
+            ? json({ error: "invalid repo name" }, 400)
+            : handleToken(request, env, name);
+        });
       }
       if (method === "GET" && path === "/api/debug/log") {
-        return gated(() => handleDebugLog(request, env));
+        return await gated(() => handleDebugLog(request, env));
       }
       if (method === "GET" && path === "/api/last-event") {
-        return gated(() => handleLastEvent(env));
-      }
-      if (method === "POST" && path === "/api/events") {
-        return handleEvent(request, env);
+        return await gated(() => handleLastEvent(env));
       }
 
       return json({ error: "not found" }, 404);
     } catch (err) {
-      return json(
-        { error: "internal", message: err instanceof Error ? err.message : String(err) },
-        500,
-      );
+      // Never surface internals: binding errors can carry ids and paths.
+      // The detail goes to the Worker's log, not to the caller.
+      console.error("gitpp: handler error", err);
+      return json({ error: "internal" }, 500);
     }
   },
 };
