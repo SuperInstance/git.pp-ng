@@ -690,6 +690,96 @@ export function verifyCheckpoint(
   return actualRoot === String(expectedRoot) ? "VERIFIED" : "STATE-ONLY";
 }
 
+// ---------------------------------------------------------------------------
+// delta derivation (checkpoint + tail) — the read-path optimisation.
+// A checkpoint pins a record's ancestor closure (state + closure root + the
+// closure records). The read path re-derives without re-reading the closure:
+// supply the checkpoint and only the TAIL (records outside the closure), and
+// derive() runs over closure ∪ tail — the full record set, so the result is
+// byte-identical to derive(all). The win is on READS; the fold is unchanged.
+// Mirrors the referee's build_checkpoint / derive_delta.
+// ---------------------------------------------------------------------------
+
+export interface Checkpoint {
+  at: string;
+  state: { [key: string]: unknown };
+  closureRoot: string;
+  closure: FoldRecord[];
+}
+
+/** Construct a checkpoint for `at` over `records`, or null if `at`'s closure is
+ * incomplete. Closure records are emitted in canonical (code-point id) order so
+ * both ports build an identical object. */
+export function buildCheckpoint(
+  records: FoldRecord[],
+  at: string,
+): Checkpoint | null {
+  const idx = indexRecords([...records]);
+  const atId = String(at);
+  if (!Object.prototype.hasOwnProperty.call(idx, atId)) return null;
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+  const closure = closureIds(atId, idx, parents);
+  if (closure === null) return null;
+  const closureRecords = closure.sort(cmpCodePoints).map((rid) => idx[rid]);
+  const root = checkpointRoot(records, atId);
+  if (root === null) return null;
+  return {
+    at: atId,
+    state: derive(closureRecords).state,
+    closureRoot: root,
+    closure: closureRecords,
+  };
+}
+
+/** Delta derivation. Returns a DeriveOutput equal to derive(closure ∪ tail), or
+ * null to signal "fall back to the full fold". Null on any doubt: malformed
+ * checkpoint, a duplicate id in the closure, a stored closure that is not
+ * exactly `at`'s ancestor closure or whose root != the pinned closureRoot,
+ * a closure that does not re-derive to the pinned state, or a tail record that
+ * shares an id with the closure. */
+export function deriveDelta(
+  checkpoint: Checkpoint | null | undefined,
+  tailRecords: FoldRecord[],
+): DeriveOutput | null {
+  if (typeof checkpoint !== "object" || checkpoint === null) return null;
+  const { at, state, closureRoot, closure } = checkpoint;
+  if (
+    typeof at !== "string" ||
+    typeof state !== "object" ||
+    state === null ||
+    Array.isArray(state) ||
+    typeof closureRoot !== "string" ||
+    !Array.isArray(closure)
+  ) {
+    return null;
+  }
+  const closureIdSet = new Set<string>();
+  for (const r of closure) {
+    const id = (r as { id?: unknown }).id;
+    if (typeof id !== "string") return null;
+    if (closureIdSet.has(id)) return null; // duplicate id in the closure
+    closureIdSet.add(id);
+  }
+  if (!closureIdSet.has(at)) return null;
+  // The stored closure must be exactly `at`'s ancestor closure within itself.
+  const idx = indexRecords([...closure]);
+  const parents: ParentsMap = {};
+  for (const rid of Object.keys(idx)) parents[rid] = parentsOf(idx[rid]);
+  const cl = closureIds(at, idx, parents);
+  if (cl === null) return null;
+  if (cl.length !== closureIdSet.size || !cl.every((id) => closureIdSet.has(id))) {
+    return null;
+  }
+  if (checkpointRoot(closure, at) !== closureRoot) return null;
+  if (!pyDeepEqual(derive(closure).state, state)) return null;
+  for (const r of tailRecords) {
+    const id = (r as { id?: unknown }).id;
+    if (typeof id === "string" && closureIdSet.has(id)) return null;
+  }
+  return derive([...closure, ...tailRecords]);
+}
+
 /**
  * Per-witness staleness, as a record-count distance (TypeScript port of the
  * referee's witness_freshness; checked against it by the conformance harness).

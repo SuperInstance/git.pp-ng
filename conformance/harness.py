@@ -617,11 +617,38 @@ def main():
                      for rid in exp_derive["order"]}
         if got.get("roots") != exp_roots:
             divergences.append((name, "closure-root digests differ"))
+        # DELTA DERIVATION (checkpoint + tail): at every legal checkpoint
+        # position, delta derivation must (a) equal the FULL derive byte-for-byte
+        # and (b) match the TS port. The full fold is the reference; the delta
+        # path must never diverge from it.
+        exp_deltas = {}
+        for rid in exp_derive["order"]:
+            cp = ref.build_checkpoint([dict(r) for r in case["records"]], rid)
+            if cp is None:
+                exp_deltas[rid] = None
+                continue
+            closure_ids = {r["id"] for r in cp["closure"]}
+            tail = [dict(r) for r in case["records"] if r.get("id") not in closure_ids]
+            d = ref.derive_delta(cp, tail)
+            exp_deltas[rid] = d
+            if d != exp_derive:
+                divergences.append(
+                    (name, f"delta@{rid} != full derive"))
+        if got.get("deltas") != exp_deltas:
+            divergences.append((name, "delta derivation differs across ports"))
 
     total_probes = sum(len(c["probes"]) for c in CASES)
     total_witnesses = sum(
         len(ref.witness_freshness([dict(r) for r in c["records"]])) for c in CASES)
     total_roots = sum(len(derive([dict(r) for r in c["records"]])["order"]) for c in CASES)
+    # Legal delta positions = applied ids with a complete closure (a buildable
+    # checkpoint). Each was checked delta==full AND cross-port above.
+    total_deltas = 0
+    for c in CASES:
+        recs = [dict(r) for r in c["records"]]
+        for rid in derive(recs)["order"]:
+            if ref.build_checkpoint([dict(r) for r in c["records"]], rid) is not None:
+                total_deltas += 1
     if divergences:
         print(f"\nDIVERGENCES: {len(divergences)} case(s):")
         for name, why in divergences[:20]:
@@ -662,7 +689,8 @@ def main():
     print(f"\nCONFORMANCE: {len(CASES)}/{len(CASES)} cases identical "
           f"(derive + {total_probes} checkpoint probes "
           f"+ {total_witnesses} witness-freshness checks "
-          f"+ {total_roots} closure-root digests); "
+          f"+ {total_roots} closure-root digests "
+          f"+ {total_deltas} delta-vs-full derivations); "
           f"oracle+invariance {oracle_checks}, transport-pin {pin_checks}, "
           f"live-golden {golden_checks}, poc-quilt-1@task-c root "
           f"{POC_QUILT1_TASK_C_ROOT[:12]}… — all pass")

@@ -92,6 +92,25 @@ is no cache to invalidate.
 
 `wrangler.toml` carries the equivalent CLI configuration.
 
+### Delta reads (checkpoint + tail)
+
+The checkpoint+tail read path (`docs/DELTA-READS.md`) adds **no routes and no
+binding changes** — deploy the Worker exactly as above (re-set `ADMIN_KEY`
+after any re-upload). Then create each project's checkpoint so `/api/state`
+reads only the tail:
+
+```
+pp.py checkpoint poc-quilt-1
+pp.py checkpoint poc-scale-1
+pp.py checkpoint demo-race-1
+```
+
+`pp.py checkpoint` is a gated write (it mints a project-repo token and pushes
+`checkpoint.json`); there is no unauthenticated creation route. Verify after:
+`curl -sD- /api/state?project=poc-quilt-1` shows `x-gitpp-derivation: delta`
+and a body byte-identical to the frozen golden; a project with no checkpoint
+still shows `full`.
+
 ## Conformance (the fold is proven, not trusted)
 
 `referee/fold.py`, the Python reference implementation of the fold,

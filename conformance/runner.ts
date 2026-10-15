@@ -6,6 +6,8 @@ import {
   verifyCheckpoint,
   witnessFreshness,
   checkpointRoot,
+  buildCheckpoint,
+  deriveDelta,
   type FoldRecord,
 } from "../src/fold.ts";
 
@@ -39,6 +41,21 @@ const results = cases.map((c) => ({
   // harness to prove the closure-root construction is identical across ports.
   roots: Object.fromEntries(
     derive(c.records).order.map((id) => [id, checkpointRoot(c.records, id)]),
+  ),
+  // Delta derivation at every legal checkpoint position: build the checkpoint
+  // at each applied id, split the records into closure + tail, and delta-derive.
+  // The harness checks each result equals the full derive AND matches the Python
+  // referee's delta. null entries mark positions with no valid checkpoint.
+  deltas: Object.fromEntries(
+    derive(c.records).order.map((id) => {
+      const cp = buildCheckpoint(c.records, id);
+      if (cp === null) return [id, null];
+      const closureSet = new Set(cp.closure.map((r) => String((r as { id?: unknown }).id)));
+      const tail = c.records.filter(
+        (r) => !closureSet.has(String((r as { id?: unknown }).id)),
+      );
+      return [id, deriveDelta(cp, tail)];
+    }),
   ),
 }));
 writeFileSync(resultsPath, JSON.stringify(results));

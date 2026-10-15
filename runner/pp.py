@@ -33,6 +33,10 @@ Refusals (checked before anything is pushed — the fold is unchanged):
   pp.py collect <project>                    print the collected records
                                              as JSON (used by scene.sh
                                              and the determinism shuffle)
+  pp.py checkpoint <project> [--at ID]       create/update the project's
+                         [--dry-run]         read-path checkpoint (checkpoint.json
+                                             on the project repo; gated write).
+                                             Lets /api/state read only the tail.
 
 Config (environment):
   PP_WORKER           Worker base URL
@@ -592,6 +596,131 @@ def cmd_collect(args):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _repo_updated_at():
+    """repo name -> updatedAt (from /api/repos), for the checkpoint's cover
+    manifest (the Worker skips re-reading a covered task repo while this
+    matches)."""
+    listing = http("GET", "/api/repos")
+    return {r.get("name"): r.get("updatedAt") for r in listing.get("repos", [])}
+
+
+def _collect_with_origin(project):
+    """Clone the project repo + every <project>--* repo and collect records the
+    same way the Worker does (project: one record per commit on main, oldest
+    first; task repos: HEAD record.json), returning
+    (records, origin, project_commit_ids, tmpdir) where:
+      origin: record id -> repo name it was first collected from;
+      project_commit_ids: {commit hash -> record id} for the project repo.
+    First-seen wins, exactly as the Worker's dedupe, so the project repo is
+    credited first. Caller removes tmpdir."""
+    _fold, poc_pp = _load_poc()
+    listing = http("GET", "/api/repos")
+    names = sorted(
+        r["name"] for r in listing.get("repos", [])
+        if r.get("name") == project or str(r.get("name", "")).startswith(project + "--")
+    )
+    if project not in names:
+        die(f"project repo {project} not found in namespace")
+    tmp = tempfile.mkdtemp(prefix="pp-checkpoint-")
+    records, origin, seen = [], {}, set()
+    project_commit_ids = {}
+    project_dir = None
+    # Project repo first (so it wins first-seen), then task repos sorted.
+    ordered = [project] + [n for n in names if n != project]
+    for name in ordered:
+        try:
+            token = mint_token(name, "read")
+        except SystemExit:
+            token = mint_token(name, "write")
+        parent = Path(tmp) / name
+        parent.mkdir(parents=True)
+        dest = fresh_checkout(name, token, parent)
+        if name == project:
+            project_dir = str(dest)
+            hashes = poc_pp._git(str(dest), "log", "--reverse", "--format=%H", "main").split()
+            for h in hashes:
+                rec = poc_pp._show_record(str(dest), h)
+                if rec is not None and isinstance(rec.get("id"), str):
+                    project_commit_ids[h] = rec["id"]
+            recs = poc_pp.project_records(str(dest))
+        else:
+            recs = poc_pp.task_records(str(dest))
+        for rec in recs:
+            rid = str(rec.get("id"))
+            if rid not in seen:
+                seen.add(rid)
+                records.append(rec)
+                origin[rid] = name
+    return records, origin, project_commit_ids, project_dir, tmp
+
+
+def cmd_checkpoint(args):
+    import datetime
+    fold, _poc_pp = _load_poc()
+    records, origin, project_commit_ids, project_dir, tmp = _collect_with_origin(args.project)
+    try:
+        at = args.at
+        if not at:
+            # Default: the applied record whose closure is largest — the most
+            # coverage for the read path. Ties resolve to the smallest id.
+            best, best_n = None, -1
+            for r in records:
+                cp = fold.build_checkpoint([dict(x) for x in records], str(r["id"]))
+                if cp is not None and len(cp["closure"]) > best_n:
+                    best_n, best = len(cp["closure"]), str(r["id"])
+            at = best
+            if at is None:
+                die("no checkpointable record (every record has an incomplete closure)")
+        cp = fold.build_checkpoint([dict(x) for x in records], str(at))
+        if cp is None:
+            die(f"record {at!r} has an incomplete closure — cannot checkpoint there")
+        closure_ids = {str(r["id"]) for r in cp["closure"]}
+        updated = _repo_updated_at()
+        cover_task_repos = {}
+        for rid in closure_ids:
+            repo = origin.get(rid)
+            if repo and repo != args.project:
+                cover_task_repos[repo] = {"updatedAt": updated.get(repo), "id": rid}
+        cover_project_commits = {
+            h: rid for h, rid in project_commit_ids.items() if rid in closure_ids
+        }
+        stored = {
+            "v": 2,
+            "project": args.project,
+            "createdAt": datetime.datetime.now(datetime.timezone.utc)
+            .isoformat().replace("+00:00", "Z"),
+            "at": cp["at"],
+            "state": cp["state"],
+            "closureRoot": cp["closureRoot"],
+            "closure": cp["closure"],
+            "coverProjectCommits": cover_project_commits,
+            "coverTaskRepos": cover_task_repos,
+        }
+        if args.dry_run:
+            print(json.dumps(stored, indent=2, sort_keys=True))
+            return
+        # Push checkpoint.json to the project repo (admin-gated write token).
+        token = mint_token(args.project, "write")
+        env = git_env(token)
+        # Re-clone a clean project checkout to push from (project_dir was a
+        # read clone; mint a write token and push a fresh commit).
+        push_parent = Path(tmp) / "__checkpoint_push"
+        push_parent.mkdir(parents=True)
+        dest = fresh_checkout(args.project, token, push_parent)
+        (dest / "checkpoint.json").write_text(json.dumps(stored, indent=2) + "\n")
+        git(["add", "checkpoint.json"], env, cwd=dest)
+        git([*GIT_IDENT, "commit", "-q", "-m", f"checkpoint at {at} "
+             f"({len(closure_ids)} records in closure)"], env, cwd=dest)
+        git(["push", "-q", "origin", "main"], env, cwd=dest)
+        print(f"checkpoint written to {args.project}: at={at}, "
+              f"closure={len(closure_ids)} records "
+              f"({len(cover_task_repos)} task repos + "
+              f"{len(cover_project_commits)} project commits covered), "
+              f"root={cp['closureRoot'][:12]}…")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def cmd_verify(args):
     fold, poc_pp = _load_poc()
     records, tmp = collect_records(args.project)
@@ -686,6 +815,17 @@ def main(argv=None):
     p = sub.add_parser("collect")
     p.add_argument("project")
     p.set_defaults(fn=cmd_collect)
+
+    p = sub.add_parser("checkpoint",
+                       help="create/update the project's read-path checkpoint "
+                            "(checkpoint.json on the project repo; gated write)")
+    p.add_argument("project")
+    p.add_argument("--at",
+                   help="record id to checkpoint at (default: the applied "
+                        "record with the largest ancestor closure)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the checkpoint JSON instead of pushing it")
+    p.set_defaults(fn=cmd_checkpoint)
 
     args = ap.parse_args(argv)
     args.fn(args)
