@@ -18,6 +18,14 @@
  *      rejected the array form outright) and stay byte-identical, and a
  *      tampered covered record under it still falls back to the full fold.
  *
+ *   4. LIVE LAYOUT (the frontier self-clash): the checkpoint commit itself
+ *      sits at HEAD of the project repo's log, uncovered by construction,
+ *      and its tree inherits the previous HEAD's record.json — for
+ *      poc-scale-1 that is witness-1, INSIDE the frontier closure. The
+ *      inherited record is re-read as tail; being an identical duplicate
+ *      of the covered record it must NOT defeat the delta path (a
+ *      divergent copy under the same id still does — see 1(e)).
+ *
  * The full fold stays the reference: every delta result is compared to the full
  * result computed by the same Worker with no checkpoint present.
  *
@@ -91,7 +99,11 @@ function makeEnv(repos) {
 // task repos <project>--<id>. (Mirrors the live poc-scale-1 / poc-quilt-1
 // layouts closely enough to exercise both the project-commit and task-repo
 // cache paths.)
-function layout(project, records) {
+// opts.checkpointCommit: add the LIVE layout's checkpoint commit at HEAD of
+// the project repo — a commit whose tree INHERITS the previous HEAD's
+// record.json (the newest project record) and which appears in NO cover
+// manifest (it did not exist when the checkpoint it carries was built).
+function layout(project, records, opts = {}) {
   const repos = {};
   const projectCommits = []; // [{commit, id}]
   const projFiles = {};
@@ -110,6 +122,14 @@ function layout(project, records) {
     projFiles[commit] = { "record.json": JSON.stringify(r, null, 2) + "\n" };
     projLog.unshift(commit); // newest first
     projectCommits.push({ commit, id: r.id });
+  }
+  if (opts.checkpointCommit && projRecs.length) {
+    const headRec = projRecs[projRecs.length - 1];
+    const commit = `c-${project}-ckpt`;
+    projFiles[commit] = {
+      "record.json": JSON.stringify(headRec, null, 2) + "\n",
+    };
+    projLog.unshift(commit); // HEAD, uncovered by construction
   }
   repos[project] = {
     updatedAt: "2026-01-01T00:00:00.000Z",
@@ -398,6 +418,47 @@ async function run() {
       check(
         S(r.body) === S(ref.body),
         `${project}: frontier tamper result matches full fold of new reality`,
+      );
+    }
+    // (f) LIVE LAYOUT — the frontier self-clash: the checkpoint commit is
+    // at HEAD of the project log, in no cover manifest, carrying an
+    // inherited copy of a covered, in-closure record. Its record.json is
+    // read as tail; the fold must treat the identical duplicate as a
+    // duplicate (drop it) and ENGAGE the delta path — before the fix,
+    // deriveDelta rejected the tail/closure id clash and every frontier
+    // read of poc-scale-1 silently fell back to the full fold.
+    {
+      const l = layout(project, records, { checkpointCommit: true });
+      installFrontierCheckpoint(l.repos, project, records, l.projectCommits, l.taskOf);
+      // Reference: the full fold over the SAME layout. The inherited
+      // duplicate changes nothing there either (collection dedupes
+      // identical duplicates), so it must equal the plain full fold.
+      const refState = await stateJson(
+        makeEnv(layout(project, records, { checkpointCommit: true }).repos).env,
+        project,
+      );
+      check(
+        refState.via === "full" && S(refState.body) === S(fullState.body),
+        `${project}: checkpoint-commit layout full fold == plain full fold`,
+      );
+      const refRecords = await recordsJson(
+        makeEnv(layout(project, records, { checkpointCommit: true }).repos).env,
+        project,
+      );
+      const e = makeEnv(l.repos);
+      const r = await stateJson(e.env, project);
+      check(
+        r.via === "delta",
+        `${project}: checkpoint commit carrying an inherited in-closure record → delta path engaged`,
+      );
+      check(
+        S(r.body) === S(refState.body),
+        `${project}: inherited-duplicate delta /api/state byte-identical to full`,
+      );
+      const rr = await recordsJson(e.env, project);
+      check(
+        S(rr.body) === S(refRecords.body),
+        `${project}: inherited-duplicate delta /api/records byte-identical to full`,
       );
     }
   }

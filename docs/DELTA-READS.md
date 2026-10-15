@@ -116,8 +116,11 @@ the full fold re-reads everything:
 - the stored closure is not exactly `at`'s ancestor closure, or its recomputed
   closure root ≠ the pinned `closureRoot` (tampered / corrupt);
 - deriving the closure does not reproduce the pinned `state` (not VERIFIED);
-- a tail record shares an id with the closure (a re-versioned covered record, or
-  an ambiguous partition);
+- a tail record RE-VERSIONS a closure record — same id, divergent content
+  (a tail record deep-equal to the closure's copy of its id is a duplicate
+  serving, not a re-version: it is dropped, as in collection's dedupe —
+  the normal case being a checkpoint commit whose tree inherits the project
+  repo's record.json, re-read as tail because that commit is in no cover);
 - a covered record's source repo/commit has vanished (the collector could not
   serve the whole closure from cache).
 

@@ -125,9 +125,10 @@ folds *from* the pinned state; it re-derives `derive(closure ∪ tail)` from
 the record set, using the pinned state and root as integrity checks over
 the stored artefact (the stored set must be exactly the members' ancestor
 closure within itself, its recomputed root must equal the pinned root, it
-must re-derive to the pinned state, and no tail record may share an id
-with the closure). Any doubt → `null` → silent full fold, exactly as
-today. A frontier checkpoint changes only the partition — which subset is
+must re-derive to the pinned state, and no tail record may RE-VERSION a
+closure record — same id, divergent content; a deep-equal tail copy of a
+covered record is a duplicate serving and is dropped). Any doubt →
+`null` → silent full fold, exactly as today. A frontier checkpoint changes only the partition — which subset is
 served from the stored artefact — so the delta path's correctness argument
 is the singleton one, with the builder as the only new code under test.
 
@@ -173,6 +174,12 @@ Python-vs-TS:
   for every case, the auto-frontier checkpoint's `deriveDelta` equals the
   full `derive` byte-for-byte in both ports, its covered set equals the
   applied set, and its pinned state equals the full derived state;
+- **tail-dup over the whole corpus**: over every case's auto-frontier
+  checkpoint, a tail record identical to a covered record engages and
+  equals the full derive in both ports, and a divergent copy under the
+  same covered id answers `null` in both ports; the poc-scale-1 incident
+  shape (witness-1 arriving as the checkpoint commit's inherited tail) is
+  pinned by name;
 - **singleton equivalence over the whole corpus**: for every applied id,
   building with `[id]` yields exactly the string-form checkpoint object,
   and `checkpointRoot(records, [id])` equals `checkpointRoot(records, id)`;
@@ -187,8 +194,11 @@ Python-vs-TS:
 ## Open items (unchanged, deliberately not decided here)
 
 The shrunk/swapped classification (captain's call, carried over from
-`CHECKPOINT-V2.md`); the leaf-match reclassification of re-versioned tail
-records (a `deriveDelta` disjointness change — a named follow-up, not part
-of this design); any caching of the namespace listing. Wiring — Worker
+`CHECKPOINT-V2.md`); any caching of the namespace listing. Wiring — Worker
 `readCheckpoint` widening, runner frontier placement and refresh-on-write,
-live re-measurement — is PR 2.
+live re-measurement — is PR 2. The `deriveDelta` disjointness reclassification
+named above as a follow-up has LANDED separately: a tail record deep-equal
+to the closure's copy of its id is a duplicate serving (dropped); only
+divergent content under a covered id still answers `null`. It was forced by
+the live layout — a checkpoint commit's inherited record.json otherwise
+defeated every frontier delta read of poc-scale-1.

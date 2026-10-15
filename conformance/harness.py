@@ -9,7 +9,10 @@ collisions, unicode/non-BMP ids, non-JS-safe integers, checkpoint forgery).
 A separate FRONTIER family (set-form checkpoints, docs/FRONTIER-CHECKPOINTS.md)
 is compared and counted apart so the classic totals stay literally unchanged;
 every case in both families also has its auto-frontier checkpoint checked
-(delta == full derive, covered set == applied set, cross-port identical).
+(delta == full derive, covered set == applied set, cross-port identical),
+plus tail-dup scenarios over that checkpoint: a tail record identical to a
+covered record is a duplicate serving (delta engages, equals the full
+derive); a divergent copy under a covered id is a re-version (delta None).
 
 The Python referee is the live oracle: expected outputs are computed by running
 fold.py at harness time, never hardcoded. A divergence is a bug in the port, by
@@ -808,6 +811,30 @@ def main():
                 or got_f.get("delta") != exp_fd):
             divergences.append(
                 (name, "frontier checkpoint differs across ports"))
+        # TAIL-DUP (the frontier self-clash): over the same auto-frontier
+        # checkpoint, a tail serving of a COVERED record with identical
+        # content is a duplicate, not a re-version — delta must ENGAGE and
+        # equal the full derive; a divergent copy under the same covered id
+        # must still answer None. (Live shape: a checkpoint commit's tree
+        # inherits the project repo's record.json, the commit is in no
+        # cover, so that record is re-read as tail on every delta read.)
+        _covered0 = fcp["closure"][0]
+        _dup = json.loads(json.dumps(_covered0))
+        _div = json.loads(json.dumps(_covered0))
+        _div["effects"] = {"__taildup__": "divergent"}
+        exp_td = {"dup": ref.derive_delta(fcp, ftail + [_dup]),
+                  "div": ref.derive_delta(fcp, ftail + [_div])}
+        if exp_td["dup"] != exp_derive:
+            divergences.append(
+                (name, "tail-dup: identical duplicate of a covered record "
+                       "!= full derive (referee)"))
+        if exp_td["div"] is not None:
+            divergences.append(
+                (name, "tail-dup: divergent copy of a covered record "
+                       "engaged (referee) — must be None"))
+        if got.get("taildup") != exp_td:
+            divergences.append(
+                (name, "tail-dup scenarios differ across ports"))
 
     for case in CASES:
         check_case(case)
@@ -874,6 +901,18 @@ def main():
             _scale, ["t40", "t50", "t60",
                       "witness-1"]) == POC_SCALE1_FRONTIER_ROOT
         assert _fcp["state"] == derive(_scale)["state"]  # C == applied set
+        # TAIL-DUP incident pin (the live poc-scale-1 shape): the frontier
+        # checkpoint commit's tree inherits witness-1's record.json and that
+        # commit is in no cover manifest, so witness-1 is re-read as tail
+        # on every live delta read. Identical content must ENGAGE and equal
+        # the full derive; a divergent witness-1 must still answer None.
+        _w1 = next(r for r in _scale if r["id"] == "witness-1")
+        assert ref.derive_delta(_fcp, [dict(_w1)]) == derive(_scale), \
+            "tail-dup: identical witness-1 tail != full derive (poc-scale-1)"
+        _w1_div = dict(_w1)
+        _w1_div["effects"] = {"__taildup__": "divergent"}
+        assert ref.derive_delta(_fcp, [_w1_div]) is None, \
+            "tail-dup: divergent witness-1 tail engaged (poc-scale-1)"
         # FRONTIER verdict pins: the referee gives the PINNED answer for
         # each semantic frontier case, not only cross-port agreement.
         _fby_name = {c["name"]: c for c in FRONTIER_CASES}
