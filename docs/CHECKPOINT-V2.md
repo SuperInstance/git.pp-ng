@@ -201,3 +201,15 @@ differs from the pinned one, not *how*. A root alone cannot distinguish a
 size or its full id set — alongside it, so verification can compare shapes and
 not just a single digest. Until that is specified, `STATE-ONLY` is the only
 answer the root can honestly give for "the closure is not the one I pinned."
+
+## Addendum: frontier checkpoints (set-form `at`)
+
+`at` generalises from one record id to a **set** of ids — the frontier —
+with the root computed by the identical construction over the union of the
+members' closures: [`FRONTIER-CHECKPOINTS.md`](FRONTIER-CHECKPOINTS.md).
+Singleton equivalence is byte-exact (a frontier of one *is* the v2
+checkpoint at that record; writers emit the string form when |F| = 1), the
+verdict semantics above carry over member-wise, and for the auto frontier
+(maximal applied records) the covered set is exactly derive's applied set.
+Fold level only, like this doc's original landing; Worker/runner wiring is
+a separate step.
