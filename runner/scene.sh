@@ -7,8 +7,7 @@
 # Needs: bash, git, curl, python3, and the admin key (pp.py reads
 # PP_ADMIN_KEY, or ../.admin-key.local next to this script's folder).
 # Git pushes go to Artifacts from wherever this script runs — run it
-# on a machine whose git can reach Artifacts (the fleet runs it on
-# Oracle; the Muse VM's route to Artifacts git hangs).
+# on a machine whose git can reach Artifacts.
 #
 # Every run uses a fresh project `demo-<random suffix>`, so it is
 # idempotent-by-suffix and re-runnable. The demo repos are left in the
@@ -26,7 +25,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PP=(python3 "$HERE/pp.py")
 WORKER="${PP_WORKER:-https://gitpp.superinstance.dev}"
-export PP_POC_DIR="${PP_POC_DIR:-$(cd "$HERE/../.." && pwd)/poc}"
+export PP_POC_DIR="${PP_POC_DIR:-$(cd "$HERE/../referee" && pwd)}"
 
 SUFFIX="$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
 PROJECT="demo-$SUFFIX"
@@ -54,8 +53,8 @@ print($expr)")" || got="__error__"
   if [ "$got" = "$want" ]; then ok "$name"; else no "$name (want $want, got $got)"; fi
 }
 
-# Temp space under $HOME, never /tmp: some fleet machines (Oracle)
-# run a tight quota on /tmp and the clones below would flake.
+# Temp space under $HOME, never /tmp: some machines run a tight quota
+# on /tmp and the clones below would flake.
 export TMPDIR="${PP_TMPDIR:-$HOME/.pp-scene-tmp}"
 mkdir -p "$TMPDIR"
 TMPD="$(mktemp -d)"

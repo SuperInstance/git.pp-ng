@@ -15,26 +15,28 @@ https://github.com/patchwork-quilt/git.pp-ng/blob/main/demo/gitpp-demo.mp4
 
 ## Prove it in two commands
 
-Everything claimed below is checkable from a cold clone — no Cloudflare account, no admin key:
+The fold's claims are checkable from a cold clone — no Cloudflare account, no admin key. You need `python3` and Node 22.18+ (the tests import TypeScript directly); there are no packages to install.
 
 ```sh
 (cd conformance && python3 harness.py)
 python3 runner/pp.py state poc-quilt-1
 ```
 
-The harness's last line is the totals line: **863/863 cases identical … — all pass**. (`npm test` runs the same harness.) The runner reads the live demo project and prints the one-line state summary: `config.timeout = 45`.
+The harness's `CONFORMANCE` line is the totals line: **863/863 cases identical … — all pass** (about a minute). The runner reads the live demo project and prints its derived state, including `config.timeout = 45` and the conflict that produced it: `winner override-1; losers (preserved): task-a, task-b, task-d`.
+
+`npm test` runs the whole offline battery — the harness, the new-vs-legacy engine differential, the scale/chaos check, the Worker tests against in-memory mocks, and the runner unit tests — in under two minutes; CI runs the same command on every push. `npm run test:live` checks the deployed demo.
 
 ## Mechanism
 
 - The atom is the **task**. For each task, a dedicated **Artifacts repository** is forked from a shared baseline, with a repo-scoped token, and agents push their competing completions into an append-only record. Project state is not stored anywhere — it is derived by folding the record.
-- **Resolution is mechanical.** Class precedence is absolute: `override` > `task` > `witness`. Within a class, a candidate that is an ancestor of another candidate is dominated and drops out; the survivors are the most-derived. Any remaining tie breaks toward the candidate with the most intent records (`task` + `override`) in its ancestry, then the fewest `witness` records, then the lexicographically smallest `id`. Losing versions are preserved in their own repositories and stay cloneable.
+- **Resolution is mechanical.** Class precedence is absolute: `override` > `task` > `witness`. Within a class, a candidate that is an ancestor of another candidate is dominated and drops out; the survivors are the most-derived. Any remaining tie breaks toward the candidate with the most intent records (`task` + `override`) in its ancestry, then the fewest `witness` records, then the lexicographically smallest `id` — arrival order is never an input. Losing versions are preserved in their own repositories and stay cloneable.
 
 ## Fact Sheet
 
 - **Conformance:** 863/863 cases identical; 1,029 checkpoint probes; 3,231 witness-freshness checks; 16,290 closure-root digests; 2,812 oracle checks; 3 transport pins; 8 live-golden checks.
-- **Scale project:** 62 records; 3 conflicts; 21 losers preserved. The fold runs in 12 ms over the 62-record project.
+- **Scale project:** 62 records; 3 conflicts; 21 losers preserved. The fold runs in 1.8 ms over the 62-record project (`RESULTS.md` §1.2).
 - **Race scenario:** Five pairs of agents pushed simultaneously; one 10-way conflict; all 9 losers preserved.
-- **Live reads:** derived state reads take 2.9–5.7 s.
+- **Live reads:** a full fold of the 62-record project reads in 2.42 s; with a frontier checkpoint, ≈0.93 s (`RESULTS.md` §1.4).
 - An override's 45 stands against a later push of 99 — checkable at the records link above.
 
 ## The record model
@@ -55,6 +57,8 @@ The state of the repository is derived through a pure function called `fold(reco
   1. The record with the most intent records (`task` + `override`) in its ancestry.
   2. The record with the fewest `witness` records in its ancestry.
   3. The record with the lexicographically smallest `id`.
+
+  Arrival order is never an input.
 - **Orphans:** Records that are missing ancestors or are affected by cycles are excluded and reported.
 
 ## Determinism, measured
@@ -67,7 +71,7 @@ A `witness` record carries an observation and no intent. Its uncontested observa
 
 ## Inheritance
 
-A reasoned `override` joins the record and binds every later derivation — including branches forked before the override existed, and branches that never descend from it — because derivation reads the whole record, and an override outranks a task wherever it sits. Watch it happen: in the live project above, `task-d` pushed `config.timeout: 99` *after* the override — and the derived state is still `45`, with `task-d` named in the conflict's losers. `task-d`'s ancestry never passes through `override-1`; the override binds it anyway. Replay the whole scene yourself with `runner/scene.sh`, or read the state endpoint and check the losers list.
+A reasoned `override` joins the record and binds every later derivation — including branches forked before the override existed, and branches that never descend from it — because derivation reads the whole record, and an override outranks a task wherever it sits. Watch it happen: in the live project above, `task-d` pushed `config.timeout: 99` *after* the override — and the derived state is still `45`, with `task-d` named in the conflict's losers. `task-d`'s ancestry never passes through `override-1`; the override binds it anyway. Read the state endpoint and check the losers list; the full scene replay (`runner/scene.sh`, operator-only — it creates repos and needs the admin key) is captured in `runner/SCENE-RUN-LOG.md`.
 
 ## Checkpoints
 
@@ -75,12 +79,12 @@ A checkpoint pins a derived state together with the closure root of the records 
 
 ## Run it yourself
 
-To run git.pp, you need:
+To deploy your own git.pp, you need:
 - A Cloudflare account (Artifacts requires Workers Paid).
-- `wrangler` and `Node` for the Worker.
+- `bun` (to bundle the Worker) and either `curl` against the Cloudflare API or `wrangler` — `DEPLOY.md` has both paths.
 - `bash`, `git`, `curl`, and `python3` for the runner.
 
-The `runner/scene.sh` script replays the full scene against a live deployment in under a minute and prints per-assertion `PASS`/`FAIL`. The `referee/fold.py` script is the Python reference implementation.
+Reading needs nothing: `pp.py state` and the `/api/*` GET routes are public. Writing is gated: `pp.py complete`, `collect`, `verify`, and `checkpoint`, and `runner/scene.sh` — which replays the full scene against a deployment in under a minute and prints per-assertion `PASS`/`FAIL` — need the deployment's admin key (`runner/README.md`). `referee/fold.py` is the Python reference implementation.
 
 ## Architecture
 
@@ -89,6 +93,17 @@ The `runner/scene.sh` script replays the full scene against a live deployment in
 - **Fold:** The fold function decides the state.
 
 Push events (`cf.artifacts.repo.pushed`) feed a Queue for observability. Derivation is per-request, ensuring that the projection is never stale.
+
+## Documentation
+
+- [`DESIGN.md`](DESIGN.md) — the spec: the fold's contract, the resolution algorithm, the determinism argument, known limits.
+- [`RESULTS.md`](RESULTS.md) — what was measured, what readers said, what is not claimed.
+- [`DEPLOY.md`](DEPLOY.md) — deploying the Worker, its routes and bindings.
+- [`runner/README.md`](runner/README.md) — the agent CLI (`pp.py`) and the scene replay.
+- [`docs/ENGINEERING.md`](docs/ENGINEERING.md) — line-by-line audit of both fold ports and the Worker.
+- [`docs/CHECKPOINT-V2.md`](docs/CHECKPOINT-V2.md), [`docs/FRONTIER-CHECKPOINTS.md`](docs/FRONTIER-CHECKPOINTS.md), [`docs/DELTA-READS.md`](docs/DELTA-READS.md) — checkpoints, closure roots, and the checkpoint-plus-tail read path.
+- [`docs/FORMAT-V2.md`](docs/FORMAT-V2.md) — records born with digests.
+- [`docs/OPEN-QUESTIONS.md`](docs/OPEN-QUESTIONS.md), [`docs/CUTTING-EDGE.md`](docs/CUTTING-EDGE.md) — open design questions and where this sits against prior art.
 
 ## License
 

@@ -146,7 +146,7 @@ closure-root digests 16,290/16,290 · float fuzz 10,018 doubles, 0 mismatches
 Burn/restart: the per-project GenServer was `:kill`ed, restarted empty
 by its supervisor, and re-fed the log **in reverse arrival order** —
 digest and derive output identical. The port also produced eight spec
-findings against `DESIGN.md`; the sharpest — §2.5's "candidates" was
+findings against `DESIGN.md`; the sharpest — DESIGN.md §2's "candidates" (step 4) was
 undefined — is fixed in the spec (PR #13), with the pinning corpus case
 quoted in the doc.
 
@@ -257,7 +257,7 @@ Each item carries the evidence that argues for it.
   a claim, verification stays lazy and falls back to recomputation,
   and a lying digest degrades its record to v1 with a warning, never
   a rejection.
-- **Defaults-as-records.** The §1d cascade becomes records in the fold
+- **Defaults-as-records.** The `docs/OPEN-QUESTIONS.md` §1d cascade becomes records in the fold
   itself — gated on one open doctrine call (lock sovereignty: is the
   captain sovereign, or is there a compliance tier above override?).
   Until the captain rules, this stays design.

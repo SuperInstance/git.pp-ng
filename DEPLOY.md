@@ -12,9 +12,14 @@ Try: `/?project=poc-quilt-1` (projection) · `/api/state?project=poc-quilt-1`
 ## Layout
 
 ```
-src/fold.ts        the fold (derive + verifyCheckpoint), refereed port
+src/fold.ts        the fold (derive + checkpoints + delta reads), refereed port
 src/worker.ts      the front door (routes below)
-conformance/       proof the TS fold == the Python referee (referee/fold.py)
+referee/fold.py    the Python reference fold — the spec oracle
+conformance/       proof the TS fold == the Python referee (harness.py)
+tests/             Worker tests against in-memory mocks; integration.mjs (live)
+runner/            pp.py, the agent CLI, and scene.sh, the scene replay
+docs/              design notes (checkpoints, delta reads, format v2, audit)
+demo/              the demo video
 wrangler.toml      deploy shape (reference form; actual deploy via API)
 .admin-key.local   the admin secret (mode 600, NEVER committed)
 ```
@@ -33,7 +38,8 @@ a task repo's HEAD `record.json` is that task's completion record.
 State is not stored — it is *derived*: the fold orders records by
 ancestry, lets the strongest class win contested keys
 (override > task > witness, absolutely), breaks remaining ties by
-ancestry cleanliness (most intent, fewest witnesses, smallest id),
+ancestry cleanliness (most intent, fewest witnesses, smallest id —
+arrival order is never an input),
 and preserves every loser in the conflict report. A captain's
 override, once in the record, governs all later derivation on
 branches that never saw it — inheritance by construction.
@@ -44,6 +50,7 @@ branches that never saw it — inheritance by construction.
 |---|---|---|---|
 | `/` | GET | — | HTML projection for `?project=` (default `poc-quilt-1`) |
 | `/api/state` | GET | — | derive output JSON for `?project=` |
+| `/api/records` | GET | — | the collected records for `?project=`, with origins and collection warnings |
 | `/api/repos` | GET | — | all repos in the namespace (cursor-paged) |
 | `/api/repos` | POST | admin | create repo `{name}` (initial token stripped from response) |
 | `/api/repos/<name>/fork` | POST | admin | fork repo to `{name}` (token stripped) |
@@ -94,9 +101,6 @@ routes exist; the deployment below uses the first.
    `Authorization: Bearer <token>`. The commands below are plain
    `curl` against `https://api.cloudflare.com/client/v4` with the
    header `-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"`.
-   (This project's fleet also drives the same calls through a
-   `cf_api.py` shorthand that attaches a stored credential; it is
-   not a public tool, and nothing below depends on it.)
 2. **wrangler.** `wrangler login` (OAuth in a browser) or the
    `CLOUDFLARE_API_TOKEN` environment variable. Only the appendix
    path needs it.
@@ -229,9 +233,11 @@ pp.py checkpoint demo-race-1
 
 `pp.py checkpoint` is a gated write (it mints a project-repo token and pushes
 `checkpoint.json`); there is no unauthenticated creation route. Verify after:
-`curl -sD- /api/state?project=poc-quilt-1` shows `x-gitpp-derivation: delta`
-and a body byte-identical to the frozen golden; a project with no checkpoint
-still shows `full`.
+`curl -sD- /api/state?project=<project>` shows `x-gitpp-derivation: delta`
+and a body byte-identical to the full fold; a project with no checkpoint
+still shows `full`. On the live demo today only `poc-scale-1` carries a
+checkpoint, so it reads `delta` while `poc-quilt-1` and `demo-race-1` read
+`full`.
 
 ## Conformance (the fold is proven, not trusted)
 

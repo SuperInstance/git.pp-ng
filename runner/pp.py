@@ -41,7 +41,7 @@ Refusals (checked before anything is pushed — the fold is unchanged):
   claim readers may verify, not an input to derivation.
   pp.py state <project>                      derived state + conflicts
   pp.py verify <project> --at ID [--tamper]  checkpoint check against the
-                                             Python referee (../poc)
+                                             Python referee (../referee)
   pp.py collect <project>                    print the collected records
                                              as JSON (used by scene.sh
                                              and the determinism shuffle)
@@ -65,8 +65,8 @@ Config (environment):
   PP_ARTIFACTS_ACCOUNT / PP_ARTIFACTS_NS
                       build git remote URLs
                       (default 049ff5e84ecf636b53b162cbb580aae6 / default)
-  PP_POC_DIR          location of poc/ (fold.py + pp.py referee);
-                      default ../../poc relative to this script
+  PP_POC_DIR          location of the Python referee (fold.py + pp.py);
+                      default ../referee relative to this script
 
 Git runs locally, wherever this command runs (a judge's machine, a
 fleet box, CI). Tokens for git are minted per operation through the
@@ -664,7 +664,7 @@ def cmd_state(args):
 
 
 # --------------------------------------------------------------------------
-# collection + verify (via the Python referee in ../poc)
+# collection + verify (via the Python referee in ../referee)
 # --------------------------------------------------------------------------
 
 def _load_poc():

@@ -2,7 +2,7 @@
 /**
  * integration.mjs — live integration tests for the gitpp Worker.
  *
- * Plain Node (18+), no dependencies. Runs against a deployed Worker base
+ * Plain Node (22.18+), no dependencies. Runs against a deployed Worker base
  * URL from env GITPP_BASE (default the public demo deployment) and asserts
  * the real derivation of project poc-quilt-1, the new /api/records view,
  * the HTML projection, and that mutating routes are gated.
