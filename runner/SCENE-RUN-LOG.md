@@ -1,17 +1,17 @@
 # Scene run log — runner/scene.sh against the live Worker + Artifacts
 
-Run: 2026-10-12 ~05:21 UTC, on Oracle (ubuntu@147.224.38.131) via
-~/workspace/ssh/osh.sh — git pushes to Artifacts run from Oracle
-because the Muse VM's route to Artifacts git hangs; the CLI itself
-is machine-agnostic (git runs wherever pp.py is invoked).
-Worker: https://gitpp.casey-digennaro.workers.dev · project:
+Run: 2026-10-12 ~05:21 UTC, from a fleet machine whose git route to
+Artifacts is healthy; the CLI itself is machine-agnostic (git runs
+wherever pp.py is invoked). Worker: the deployment's original
+`workers.dev` address (it appears verbatim in the transcript below;
+the demo now serves from https://gitpp.superinstance.dev) · project:
 demo-624c3a (fresh random suffix) · wall time: ~44 s.
 
 **Verdict: 26 passed, 0 failed.**
 
 Run history, honestly: the first attempt (project demo-a11701)
-scored 23/25. Both failures traced to one cause — Oracle's /tmp
-tmpfs is quota-tight, so the scene's temp dir ate "Disk quota
+scored 23/25. Both failures traced to one cause — that machine's
+/tmp tmpfs is quota-tight, so the scene's temp dir ate "Disk quota
 exceeded": the four work files never got written, and one `pp
 collect` clone flaked. Fix: scene.sh now pins TMPDIR under $HOME
 (PP_TMPDIR to override) and asserts the work files are staged;

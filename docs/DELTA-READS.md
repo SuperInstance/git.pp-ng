@@ -100,9 +100,8 @@ checkpoint, a frontier read costs ≈ **6 + 2n** binding calls (2 `list` +
 2 per tail repo) against the full fold's 6 + 2|C| + 2n. What remains after
 the fan-out is gone is the **serial prefix** — four strictly serial
 substrate calls that no checkpoint shape can remove. Before deployment, the
-design note (`research/deep/frontier-checkpoints.md` §4) priced that prefix
-at roughly half of poc-scale-1's 2.42 s full-fold read and predicted a
-landing band of ≈ 1.3–1.8 s. Measured after deployment, a frontier
+frontier design note priced that prefix at roughly half of poc-scale-1's
+2.42 s full-fold read and predicted a landing band of ≈ 1.3–1.8 s. Measured after deployment, a frontier
 checkpoint (closure 62/62) reads at a **≈0.93 s median** (n=7, 0.65–1.62 s)
 — below the predicted band (`RESULTS.md` §1.4).
 
@@ -176,3 +175,5 @@ pp.py checkpoint demo-race-1
 Then verify: `/api/state?project=poc-quilt-1` byte-identical to the frozen
 golden, `x-gitpp-derivation: delta`, the conformance live-golden 8/8, and
 `pp.py state` on all three demo projects unchanged from the full fold.
+On the live demo today only `poc-scale-1` carries a checkpoint (it reads
+`delta`); `poc-quilt-1` and `demo-race-1` read `full`.

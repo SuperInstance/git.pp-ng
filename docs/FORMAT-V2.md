@@ -85,7 +85,8 @@ parent with a v1 child, a v1 parent with a v2 child, and checkpoints
 taken over either all root and verify identically, because the root was
 always a digest of content and the leaf the digest names is the leaf the
 checkpoint already used. Readers that predate v2 see one more extra
-field, which the envelope rule (DESIGN §1) already tolerates.
+field, which they already ignore: the fold reads only the five content
+fields (DESIGN §1, Inputs).
 
 What the field buys today is integrity annotation where records are
 gathered (collection names a lying copy at read time instead of letting

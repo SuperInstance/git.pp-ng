@@ -63,13 +63,14 @@ python3 pp.py complete my-project--task-a \
 # derived state + conflicts for a project (public, no key)
 python3 pp.py state my-project
 
-# checkpoint verification against the Python referee: collect the
-# records from the repos, derive the ancestor-closure state at a
-# record, and check it. --tamper flips one value and must be rejected.
+# checkpoint verification against the Python referee (gated: it
+# mints read tokens to clone the repos): collect the records, derive
+# the ancestor-closure state at a record, and check it. --tamper
+# flips one value and must be rejected.
 python3 pp.py verify my-project --at task-a
 python3 pp.py verify my-project --at task-a --tamper
 
-# dump the collected records as JSON (what scene.sh shuffles)
+# dump the collected records as JSON (what scene.sh shuffles; gated)
 python3 pp.py collect my-project
 ```
 
@@ -77,8 +78,8 @@ python3 pp.py collect my-project
 `override` — overrides take `--reason "..."`), and for the project
 repo itself, which accumulates one record per commit (genesis,
 witnesses, overrides) while each task repo carries its task's record
-at HEAD. Git runs wherever you invoke the command; the fleet runs it
-from Oracle because that network route to Artifacts git is healthy.
+at HEAD. Git runs wherever you invoke the command, so run it on a
+machine whose git can reach Artifacts.
 Temp clones live under `$TMPDIR` (`PP_TMPDIR` to override) and are
 deleted after each command.
 

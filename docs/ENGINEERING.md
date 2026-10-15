@@ -142,9 +142,10 @@ ASCII. They diverge on exactly three things, each of which is now pinned:
   tie-break, which were O(pool · D) *each*. Measured on a 2,000-candidate,
   depth-1,000 contested key: **1,567 ms → 838 ms**. A count-only DP (carrying
   intent/witness tallies, not full sets) would drop the materialisation cost
-  further — named as the next step (DESIGN.md §6).
-- **Parity.** By construction; outputs unchanged (the whole 855-case suite, and
-  `live_golden`, prove byte-identity to before).
+  further — since superseded by the bitset ancestry engine (PR #14,
+  `RESULTS.md` §1.2).
+- **Parity.** By construction; outputs unchanged (the whole suite — 855 cases
+  at the time — and `live_golden`, prove byte-identity to before).
 
 ### `derive` — per-key resolution + **ancestry-reduction fix, ADDENDUM #3**
 
@@ -202,8 +203,8 @@ ASCII. They diverge on exactly three things, each of which is now pinned:
   output. Absent for orphaned witnesses (as they are absent from state).
 - **Complexity.** O(R·D) worst case (walks each witness's ancestry); could reuse
   the `anc` memo in a future pass.
-- **Parity.** Harness; 3,224 witness-freshness checks compared Python-vs-TS, plus
-  the `wf-*` fixtures with hand-checked values.
+- **Parity.** Harness; 3,224 witness-freshness checks (at the time) compared
+  Python-vs-TS, plus the `wf-*` fixtures with hand-checked values.
 
 ---
 
@@ -215,7 +216,7 @@ fold. Every point a record can be dropped:
 
 | # | Drop site | Cause | Verdict |
 |---|---|---|---|
-| 1 | `JSON.parse` throws | `record.json` is not JSON a JS reader accepts — including **NaN/Infinity**, which Python's lenient `json.loads` *would* accept | **Named, documented.** The Worker's reader is the authority (the fold is the Worker's). A record a JS reader rejects is not folded; a Python-only reader would disagree. NaN/Infinity are out of the record domain (DESIGN.md §6). |
+| 1 | `JSON.parse` throws | `record.json` is not JSON a JS reader accepts — including **NaN/Infinity**, which Python's lenient `json.loads` *would* accept | **Named, documented.** The Worker's reader is the authority (the fold is the Worker's). A record a JS reader rejects is not folded; a Python-only reader would disagree. NaN/Infinity are out of the record domain (DESIGN.md §5). |
 | 2 | `typeof rec.id !== "string"` | missing or non-string id | **Documented.** A record with no string id has no identity to fold; skipped. |
 | 3 | identical duplicate id | same record in the project repo AND at a task HEAD | **Safe by design.** First-seen wins; the dropped copy is byte-identical. This is the intended dedupe. |
 | 4 | **divergent** duplicate id | same id, *different content*, in two repos | **Surfaced.** First-seen wins, but the drop is now reported in `collectionWarnings` on `/api/records` (`{id, keptFrom, droppedFrom}`) rather than lost. This also means the fold's own duplicate-id tie-break is not exercised at the Worker layer — only one record per id reaches `derive()`. In the real topology each id has one repo, so this is an upstream-corruption signal. |

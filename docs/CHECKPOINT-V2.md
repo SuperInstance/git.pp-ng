@@ -72,7 +72,7 @@ leaf  = SHA-256( UTF-8(canon) )                    # lowercase hex
   *order* carries no meaning in this system, so it is deliberately not content
   the leaf pins — reordering parents is not a tamper.)
 - **Float64 domain + leaf-number encoding (one canonical form, both ports).**
-  Record numbers are IEEE-754 float64 (DESIGN.md §6). An integer outside the
+  Record numbers are IEEE-754 float64 (DESIGN.md §5, Number domain). An integer outside the
   JS-safe range is float64-canonicalised first (`9007199254740993` → the double
   `9007199254740992`). The number is then rendered into **one** canonical
   decimal both ports compute identically:
@@ -88,7 +88,7 @@ leaf  = SHA-256( UTF-8(canon) )                    # lowercase hex
   This pins the bytes identically across the **whole** float64 domain, not only
   the safe range — e.g. `1e-5` → `1e-05` (not JS's `0.00001`), `2.5e-7` →
   `2.5e-07`. (Values `≥ 1e21` or non-finite are outside the pinned domain, as in
-  DESIGN.md §6.) A 40,002-value cross-port fuzz (targeted splitters + random
+  DESIGN.md §5.) A 40,002-value cross-port fuzz (targeted splitters + random
   doubles across every magnitude + random bit patterns) confirms Python
   `json.dumps` and the TypeScript renderer emit identical bytes for all of them.
 

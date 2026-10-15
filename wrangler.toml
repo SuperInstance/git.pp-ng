@@ -2,7 +2,7 @@
 #
 # The deploy performed for this build used the Cloudflare API directly
 # (multipart upload via the workspace cloudflare skill, bindings declared
-# in the upload metadata from the start — see README-BUILD.md). This file
+# in the upload metadata from the start — see DEPLOY.md). This file
 # is the equivalent wrangler configuration for a CLI deploy:
 #
 #   bun build src/worker.ts --outfile dist/worker.js --format=esm --target=browser

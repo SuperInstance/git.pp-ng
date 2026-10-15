@@ -154,8 +154,9 @@ else) and the HTML projection shows `witness (N behind)`.
 | `wf-orphan-witness` | `w` | absent (orphan, not applied) |
 
 **Conformance.** `runner.ts` emits `freshness`; the harness compares it
-Python-vs-TS for every case. Current totals: **843/843 cases, 980 checkpoint
-probes, 3213 witness-freshness checks**, all identical.
+Python-vs-TS for every case. Totals when this landed: 843/843 cases, 980
+checkpoint probes, 3213 witness-freshness checks, all identical (the suite
+has since grown; current totals are in `RESULTS.md`).
 
 ### Position
 
