@@ -498,7 +498,10 @@ def derive_delta(checkpoint, tail_records):
         missing records), or its recomputed root != the pinned closureRoot
         (tampered / stale checkpoint);
       * deriving the closure does not reproduce the pinned state (not VERIFIED);
-      * a tail record shares an id with the closure (ambiguous partition).
+      * a tail record RE-VERSIONS a closure record (same id, divergent
+        content). A tail record carrying a covered id with deep-equal
+        content is a duplicate serving of that record, not a re-version:
+        it is dropped, exactly as collection dedupes identical duplicates.
 
     When it returns a dict, that dict equals derive(closure ∪ tail) exactly —
     and since a well-formed caller passes tail = (all current records) minus the
@@ -521,12 +524,14 @@ def derive_delta(checkpoint, tail_records):
     if members is None:
         return None
     closure_ids = set()
+    closure_by_id = {}
     for r in closure:
         if not isinstance(r, dict) or not isinstance(r.get("id"), str):
             return None
         if r["id"] in closure_ids:
             return None  # duplicate id in the closure — ambiguous
         closure_ids.add(r["id"])
+        closure_by_id[r["id"]] = r
     if any(m not in closure_ids for m in members):
         return None
     # The stored closure must be exactly the members' ancestor closure within
@@ -540,11 +545,22 @@ def derive_delta(checkpoint, tail_records):
         return None
     if derive(closure)["state"] != {k: _canon_num(v) for k, v in want.items()}:
         return None
-    # The tail must be disjoint from the closure by id.
+    # Tail/closure overlap by id. Identical content under a covered id is a
+    # duplicate serving of the covered record — drop it. (The normal case,
+    # not an exotic one: a checkpoint commit's tree inherits the project
+    # repo's record.json, that commit is never in its own cover, so the
+    # record it carries is re-read as tail on every delta read of that
+    # project.) Divergent content under a covered id is a re-versioned
+    # covered record — the tripwire still fires and the full fold decides.
+    # Records are compared in canonicalised form, as derive() ingests them.
+    tail = []
     for r in tail_records:
         if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"] in closure_ids:
-            return None
-    return derive(list(closure) + list(tail_records))
+            if _canonical_record(r) != _canonical_record(closure_by_id[r["id"]]):
+                return None
+            continue
+        tail.append(r)
+    return derive(list(closure) + tail)
 
 
 def witness_freshness(records):

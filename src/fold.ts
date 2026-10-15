@@ -1088,8 +1088,11 @@ export function buildFrontierCheckpoint(
  * null to signal "fall back to the full fold". Null on any doubt: malformed
  * checkpoint, a duplicate id in the closure, a stored closure that is not
  * exactly `at`'s ancestor closure or whose root != the pinned closureRoot,
- * a closure that does not re-derive to the pinned state, or a tail record that
- * shares an id with the closure.
+ * a closure that does not re-derive to the pinned state, or a tail record
+ * that RE-VERSIONS a closure record (same id, divergent content). A tail
+ * record carrying a covered id with deep-equal content is a duplicate
+ * serving of that record, not a re-version: it is dropped, exactly as
+ * collection dedupes identical duplicates (DESIGN's collection rules).
  *
  * Frontier form: the checkpoint's `at` may be an ARRAY of ids
  * (docs/FRONTIER-CHECKPOINTS.md); the stored closure must then be exactly
@@ -1114,11 +1117,13 @@ export function deriveDelta(
   const members = frontierMembers(at);
   if (members === null) return null;
   const closureIdSet = new Set<string>();
+  const closureById = new Map<string, FoldRecord>();
   for (const r of closure) {
     const id = (r as { id?: unknown }).id;
     if (typeof id !== "string") return null;
     if (closureIdSet.has(id)) return null; // duplicate id in the closure
     closureIdSet.add(id);
+    closureById.set(id, r);
   }
   if (!members.every((m) => closureIdSet.has(m))) return null;
   // The stored closure must be exactly the members' ancestor closure within
@@ -1133,11 +1138,23 @@ export function deriveDelta(
   }
   if (checkpointRoot(closure, members) !== closureRoot) return null;
   if (!pyDeepEqual(derive(closure).state, state)) return null;
+  // Tail/closure overlap by id. Identical content under a covered id is a
+  // duplicate serving of the covered record — drop it. (This is the normal
+  // case, not an exotic one: a checkpoint commit's tree inherits the
+  // project repo's record.json, that commit is never in its own cover, so
+  // the record it carries is re-read as tail on every delta read of that
+  // project.) Divergent content under a covered id is a re-versioned
+  // covered record — the tripwire still fires and the full fold decides.
+  const tail: FoldRecord[] = [];
   for (const r of tailRecords) {
     const id = (r as { id?: unknown }).id;
-    if (typeof id === "string" && closureIdSet.has(id)) return null;
+    if (typeof id === "string" && closureIdSet.has(id)) {
+      if (!pyDeepEqual(r, closureById.get(id))) return null;
+      continue;
+    }
+    tail.push(r);
   }
-  return derive([...closure, ...tailRecords]);
+  return derive([...closure, ...tail]);
 }
 
 /**

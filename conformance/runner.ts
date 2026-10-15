@@ -78,6 +78,31 @@ const results = cases.map((c) => ({
       delta: deriveDelta(fcp, tail),
     };
   })(),
+  // TAIL-DUP scenarios over the auto-frontier checkpoint (the frontier
+  // self-clash): a tail record carrying a COVERED id whose content is
+  // identical to the closure's copy is a duplicate serving — deriveDelta
+  // drops it and engages (dup must equal the full derive); divergent
+  // content under a covered id is a re-version — deriveDelta must answer
+  // null (div). The harness checks both against the referee. null when no
+  // frontier checkpoint exists for the case.
+  taildup: (() => {
+    const fcp = buildFrontierCheckpoint(c.records);
+    if (fcp === null) return null;
+    const closureSet = new Set(
+      fcp.closure.map((r) => String((r as { id?: unknown }).id)),
+    );
+    const tail = c.records.filter(
+      (r) => !closureSet.has(String((r as { id?: unknown }).id)),
+    );
+    const covered = fcp.closure[0];
+    const dup = JSON.parse(JSON.stringify(covered)) as FoldRecord;
+    const div = JSON.parse(JSON.stringify(covered)) as FoldRecord;
+    div.effects = { __taildup__: "divergent" };
+    return {
+      dup: deriveDelta(fcp, [...tail, dup]),
+      div: deriveDelta(fcp, [...tail, div]),
+    };
+  })(),
 }));
 writeFileSync(resultsPath, JSON.stringify(results));
 console.log(`runner: ${results.length} cases`);
