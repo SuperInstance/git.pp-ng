@@ -1,12 +1,13 @@
 # Frontier checkpoints — set-form closure roots
 
-Post-competition design work, **fold level only**: implemented in both ports
-(`referee/fold.py`, `src/fold.ts`) in lockstep and pinned by the conformance
-harness, exactly as checkpoint v2 landed. It is **not** wired into the Worker
-or `pp.py` — `readCheckpoint` still accepts only the string form, and the
-runner still places single-record checkpoints. Wiring (Worker stored-checkpoint
-widening, runner frontier placement + refresh) is a separate PR; this one lands
-the primitive and its proofs.
+Post-competition design work, implemented in both ports (`referee/fold.py`,
+`src/fold.ts`) in lockstep and pinned by the conformance harness, exactly as
+checkpoint v2 landed — and **wired end to end**. The Worker's `readCheckpoint`
+accepts the frontier array form (`checkpointAtOk` in `src/worker.ts`), and
+`pp.py checkpoint` places a frontier checkpoint by default (`--at ID` keeps the
+single-record form). History: the fold primitive and its proofs landed in
+PR #20, the Worker and runner wiring in PR #21, and the live tail-dup fix in
+PR #22 (see Open items). Live results are in `RESULTS.md` §1.4.
 
 ## Why: coverage is a frontier property, not a chain property
 
@@ -52,8 +53,9 @@ set of ids.
   members, non-string members — is rejected: `verifyCheckpoint` answers
   `MISMATCH` (v2) / `false` (v1), `deriveDelta` returns `null` (fall back
   to the full fold), `checkpointRoot` returns `null`.
-- **Stored-file version.** Frontier `checkpoint.json` files bump `v` to `3`
-  as documentation when wiring lands. No fold-level reader inspects `v`;
+- **Stored-file version.** The runner writes `v: 3` on frontier
+  (array-form) `checkpoint.json` files and `v: 2` on single-record ones.
+  It is documentation only: no reader — fold or Worker — inspects `v`;
   the structural check above is the discriminator, and it fails safe in
   both directions (see Rollout safety).
 
@@ -144,16 +146,25 @@ closure}`) with `at` the string form for |F| = 1 and the sorted member
 array otherwise, or `null` when no valid checkpoint exists (no applied
 records; an absent member; an incomplete member closure; a malformed
 member list). Creation cost is one `derive` plus one root over C — cheaper
-than the singleton default's largest-closure hunt over every record.
+than the former single-record default's largest-closure hunt over every
+record.
 
-## Rollout safety (against the shipped code)
+## Rollout safety (as shipped)
 
-A frontier file read by today's Worker hits `readCheckpoint`'s
-`typeof c.at !== "string"` check → returns `null` → the project reads as
-*no checkpoint* → full fold. Today's fold-level `verifyCheckpoint` would
-`String()` the array, find no such id, and answer `MISMATCH` — never a
-false `VERIFIED`. So a frontier file can land in a project repo before any
-reader understands it, and the worst outcome is the slow path.
+Readers dispatch on the form of `at`, never on `v`, and fail safe at every
+layer. A well-formed frontier file is read by the Worker and served by the
+delta path, with `deriveDelta` re-verifying the root and state over the
+stored closure; a single-record (string-form) file reads exactly as it did
+before the frontier form existed. A malformed `at` — an empty array,
+duplicate or non-string members, a non-string scalar — is rejected by the
+Worker (`checkpointAtOk` fails, `readCheckpoint` returns `null`, the project
+reads as *no checkpoint*, full fold) and by the fold (`verifyCheckpoint` →
+`MISMATCH` / `false`, `deriveDelta` → `null`). The worst outcome of a
+malformed checkpoint file is the slow path, never a false `VERIFIED`.
+
+Before the wiring landed (PR #21), the Worker rejected every array-form
+`at` with a `typeof c.at !== "string"` check, so frontier files could be
+written ahead of their readers with the same slow-path worst case.
 
 ## Conformance
 
@@ -191,14 +202,23 @@ Python-vs-TS:
 3a0919f1cee5e312f5913941116ead057d2b7ad8df998a09025157affaad99ac
 ```
 
-## Open items (unchanged, deliberately not decided here)
+## Open items
 
-The shrunk/swapped classification (captain's call, carried over from
-`CHECKPOINT-V2.md`); any caching of the namespace listing. Wiring — Worker
-`readCheckpoint` widening, runner frontier placement and refresh-on-write,
-live re-measurement — is PR 2. The `deriveDelta` disjointness reclassification
-named above as a follow-up has LANDED separately: a tail record deep-equal
-to the closure's copy of its id is a duplicate serving (dropped); only
-divergent content under a covered id still answers `null`. It was forced by
-the live layout — a checkpoint commit's inherited record.json otherwise
-defeated every frontier delta read of poc-scale-1.
+Still open, deliberately not decided here: the shrunk/swapped classification
+(captain's call, carried over from `CHECKPOINT-V2.md`); any caching of the
+namespace listing; and **refresh-on-write** — pushing a record does not
+re-checkpoint, so refresh is a manual `pp.py checkpoint` run (staleness costs
+only the appends since creation; see `DELTA-READS.md`).
+
+Shipped from the original wiring list: Worker `readCheckpoint` widening and
+runner frontier placement (PR #21), and the live re-measurement — on
+`poc-scale-1` a frontier checkpoint (closure 62/62) reads at a ≈0.93 s
+median (n=7, 0.65–1.62 s) against 2.42 s for the full fold (`RESULTS.md`
+§1.4).
+
+Also shipped, in PR #22: the `deriveDelta` disjointness reclassification
+described under *deriveDelta with a frontier checkpoint* — a tail record
+deep-equal to the closure's copy of its id is a duplicate serving (dropped);
+only divergent content under a covered id still answers `null`. It was
+forced by the live layout: a checkpoint commit's inherited `record.json`
+otherwise defeated every frontier delta read of poc-scale-1.
