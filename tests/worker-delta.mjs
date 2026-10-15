@@ -12,6 +12,12 @@
  *      (records outside the closure) plus the project-repo commits; the covered
  *      task repos cost neither a get nor a readFile.
  *
+ *   3. FRONTIER FORM: a checkpoint whose `at` is the array of maximal applied
+ *      records (docs/FRONTIER-CHECKPOINTS.md) covers the whole applied set;
+ *      the read path must ENGAGE the delta path for it (readCheckpoint once
+ *      rejected the array form outright) and stay byte-identical, and a
+ *      tampered covered record under it still falls back to the full fold.
+ *
  * The full fold stays the reference: every delta result is compared to the full
  * result computed by the same Worker with no checkpoint present.
  *
@@ -21,7 +27,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import worker from "../src/worker.ts";
-import { buildCheckpoint } from "../src/fold.ts";
+import { buildCheckpoint, buildFrontierCheckpoint } from "../src/fold.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = JSON.parse(
@@ -137,6 +143,34 @@ function installCheckpoint(repos, project, records, at, projectCommits, taskOf) 
     if (name) coverTaskRepos[name] = { updatedAt: repos[name].updatedAt, id };
   }
   const stored = { v: 2, project, ...cp, coverProjectCommits, coverTaskRepos };
+  repos[project].files.main["checkpoint.json"] = JSON.stringify(stored, null, 2) + "\n";
+  return stored;
+}
+
+// Assemble a FRONTIER checkpoint.json (as the runner now writes by default):
+// `at` is the array of maximal applied records and the covered set is the
+// union of their closures — for these fixtures the whole applied set, so the
+// cover manifest spans every repo in the layout. Frontier files carry v: 3.
+function installFrontierCheckpoint(repos, project, records, projectCommits, taskOf) {
+  const cp = buildFrontierCheckpoint(records);
+  if (!cp) throw new Error("no frontier checkpoint for " + project);
+  const closureIds = new Set(cp.closure.map((r) => r.id));
+  const coverProjectCommits = {};
+  for (const { commit, id } of projectCommits) {
+    if (closureIds.has(id)) coverProjectCommits[commit] = id;
+  }
+  const coverTaskRepos = {};
+  for (const id of closureIds) {
+    const name = taskOf[id];
+    if (name) coverTaskRepos[name] = { updatedAt: repos[name].updatedAt, id };
+  }
+  const stored = {
+    v: Array.isArray(cp.at) ? 3 : 2,
+    project,
+    ...cp,
+    coverProjectCommits,
+    coverTaskRepos,
+  };
   repos[project].files.main["checkpoint.json"] = JSON.stringify(stored, null, 2) + "\n";
   return stored;
 }
@@ -278,6 +312,93 @@ async function run() {
       const refEnv = makeEnv(layout(project, [...records, newRec]).repos);
       const ref = await stateJson(refEnv.env, project);
       check(S(r.body) === S(ref.body), `${project}: appended-tail delta matches full fold`);
+    }
+    // (d) FRONTIER checkpoint: `at` is the array of maximal applied records;
+    // the covered set is the union of their closures == the whole applied
+    // set, so the cover manifest spans EVERY repo in the layout. The read
+    // must engage the delta path (readCheckpoint once returned null for the
+    // array form and the project silently read full) and stay byte-identical.
+    {
+      const l = layout(project, records);
+      const stored = installFrontierCheckpoint(l.repos, project, records, l.projectCommits, l.taskOf);
+      check(
+        Array.isArray(stored.at) && stored.at.length >= 2,
+        `${project}: frontier checkpoint carries the array form of at`,
+        JSON.stringify(stored.at),
+      );
+      check(
+        stored.closure.length === records.length,
+        `${project}: frontier covered set == whole record set (${stored.closure.length}/${records.length})`,
+      );
+      check(
+        Object.keys(stored.coverTaskRepos).length === Object.keys(l.taskOf).length &&
+          Object.keys(stored.coverProjectCommits).length === l.projectCommits.length,
+        `${project}: frontier cover manifest spans every repo`,
+      );
+      const e = makeEnv(l.repos);
+      const r = await stateJson(e.env, project);
+      check(r.via === "delta", `${project}: frontier checkpoint → delta path engaged`);
+      check(
+        S(r.body) === S(fullState.body),
+        `${project}: frontier delta /api/state byte-identical to full`,
+      );
+      const rr = await recordsJson(e.env, project);
+      check(
+        S(rr.body) === S(fullRecords.body),
+        `${project}: frontier delta /api/records byte-identical to full`,
+      );
+      // READ COST on a fresh env, one /api/state: every covered repo is
+      // served from the checkpoint, so the ONLY binding calls are the
+      // serial prefix — list, get(project) x2 (derivation + collection),
+      // log(project), and the single readFile of checkpoint.json itself.
+      // No task repo costs a get or a readFile. (Live adds one null readFile
+      // for the commit that CARRIES checkpoint.json — the mock rides it on
+      // the main ref; see docs/FRONTIER-CHECKPOINTS.md §4's ≈6-call table.)
+      const envCost = makeEnv(
+        (() => {
+          const lf = layout(project, records);
+          installFrontierCheckpoint(lf.repos, project, records, lf.projectCommits, lf.taskOf);
+          return lf.repos;
+        })(),
+      );
+      await stateJson(envCost.env, project);
+      check(
+        envCost.counts.get === 2 && envCost.counts.readFile === 1,
+        `${project}: frontier read touches no covered repo (get=${envCost.counts.get}, readFile=${envCost.counts.readFile}; full readFile=${fullReads})`,
+        JSON.stringify(envCost.counts),
+      );
+      console.log(
+        `       ${project}: frontier at=${JSON.stringify(stored.at)}; binding calls ` +
+          `${JSON.stringify(envCost.counts)} for a fully-covered state read`,
+      );
+    }
+    // (e) a tampered covered record under a FRONTIER checkpoint → full
+    // fallback, byte-identical to the full fold of the mutated reality.
+    {
+      const l = layout(project, records);
+      installFrontierCheckpoint(l.repos, project, records, l.projectCommits, l.taskOf);
+      const stored = JSON.parse(l.repos[project].files.main["checkpoint.json"]);
+      const names = Object.keys(stored.coverTaskRepos);
+      const name = names[0];
+      const id = stored.coverTaskRepos[name].id;
+      const mutated = { ...records.find((x) => x.id === id), effects: { reversioned: 1 } };
+      l.repos[name].files.main["record.json"] = JSON.stringify(mutated, null, 2) + "\n";
+      l.repos[name].updatedAt = "2099-12-31T23:59:59.000Z";
+      const e = makeEnv(l.repos);
+      const r = await stateJson(e.env, project);
+      check(r.via === "full", `${project}: frontier + re-versioned covered record → full fallback`);
+      const refEnv = makeEnv(
+        (() => {
+          const lf = layout(project, records);
+          lf.repos[name] = l.repos[name];
+          return lf.repos;
+        })(),
+      );
+      const ref = await stateJson(refEnv.env, project);
+      check(
+        S(r.body) === S(ref.body),
+        `${project}: frontier tamper result matches full fold of new reality`,
+      );
     }
   }
 

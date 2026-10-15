@@ -41,6 +41,10 @@ Refusals (checked before anything is pushed — the fold is unchanged):
   pp.py checkpoint <project> [--at ID]       create/update the project's
                          [--dry-run]         read-path checkpoint (checkpoint.json
                                              on the project repo; gated write).
+                                             Default is a FRONTIER checkpoint
+                                             (the maximal applied records; their
+                                             closures cover the whole applied
+                                             set); --at pins one record instead.
                                              Lets /api/state read only the tail.
 
 Config (environment):
@@ -728,21 +732,25 @@ def cmd_checkpoint(args):
     fold, _poc_pp = _load_poc()
     records, origin, project_commit_ids, project_dir, tmp = _collect_with_origin(args.project)
     try:
-        at = args.at
-        if not at:
-            # Default: the applied record whose closure is largest — the most
-            # coverage for the read path. Ties resolve to the smallest id.
-            best, best_n = None, -1
-            for r in records:
-                cp = fold.build_checkpoint([dict(x) for x in records], str(r["id"]))
-                if cp is not None and len(cp["closure"]) > best_n:
-                    best_n, best = len(cp["closure"]), str(r["id"])
-            at = best
-            if at is None:
-                die("no checkpointable record (every record has an incomplete closure)")
-        cp = fold.build_checkpoint([dict(x) for x in records], str(at))
-        if cp is None:
-            die(f"record {at!r} has an incomplete closure — cannot checkpoint there")
+        if args.at:
+            # --at keeps the single-record placement (forensics/regression):
+            # the checkpoint pins that one record's ancestor closure.
+            cp = fold.build_checkpoint([dict(x) for x in records], str(args.at))
+            if cp is None:
+                die(f"record {args.at!r} has an incomplete closure — cannot checkpoint there")
+        else:
+            # Default: a FRONTIER checkpoint (docs/FRONTIER-CHECKPOINTS.md).
+            # The frontier is the set of maximal applied records; the covered
+            # set is the union of their closures, which for the auto-computed
+            # frontier is exactly the whole applied set — coverage no longer
+            # depends on the project's chain topology (a single-record
+            # checkpoint covers only one strand of a wide, parallel project).
+            cp = fold.build_frontier_checkpoint([dict(x) for x in records])
+            if cp is None:
+                die("no checkpointable frontier (no applied records, or a "
+                    "frontier member has an incomplete closure)")
+        at = cp["at"]
+        at_label = at if isinstance(at, str) else "frontier:" + "+".join(at)
         closure_ids = {str(r["id"]) for r in cp["closure"]}
         updated = _repo_updated_at()
         cover_task_repos = {}
@@ -754,7 +762,10 @@ def cmd_checkpoint(args):
             h: rid for h, rid in project_commit_ids.items() if rid in closure_ids
         }
         stored = {
-            "v": 2,
+            # v is documentation only — readers dispatch on the structural
+            # form of `at` (string vs array), never on v. Frontier files
+            # (array form) carry v: 3; single-record files stay v: 2.
+            "v": 3 if isinstance(at, list) else 2,
             "project": args.project,
             "createdAt": datetime.datetime.now(datetime.timezone.utc)
             .isoformat().replace("+00:00", "Z"),
@@ -778,10 +789,10 @@ def cmd_checkpoint(args):
         dest = fresh_checkout(args.project, token, push_parent)
         (dest / "checkpoint.json").write_text(json.dumps(stored, indent=2) + "\n")
         git(["add", "checkpoint.json"], env, cwd=dest)
-        git([*GIT_IDENT, "commit", "-q", "-m", f"checkpoint at {at} "
+        git([*GIT_IDENT, "commit", "-q", "-m", f"checkpoint at {at_label} "
              f"({len(closure_ids)} records in closure)"], env, cwd=dest)
         git(["push", "-q", "origin", "main"], env, cwd=dest)
-        print(f"checkpoint written to {args.project}: at={at}, "
+        print(f"checkpoint written to {args.project}: at={at_label}, "
               f"closure={len(closure_ids)} records "
               f"({len(cover_task_repos)} task repos + "
               f"{len(cover_project_commits)} project commits covered), "
@@ -890,8 +901,9 @@ def main(argv=None):
                             "(checkpoint.json on the project repo; gated write)")
     p.add_argument("project")
     p.add_argument("--at",
-                   help="record id to checkpoint at (default: the applied "
-                        "record with the largest ancestor closure)")
+                   help="record id to checkpoint at (default: a frontier "
+                        "checkpoint over the maximal applied records, whose "
+                        "closures cover the whole applied set)")
     p.add_argument("--dry-run", action="store_true",
                    help="print the checkpoint JSON instead of pushing it")
     p.set_defaults(fn=cmd_checkpoint)

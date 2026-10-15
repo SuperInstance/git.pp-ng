@@ -290,6 +290,15 @@ interface CollectionWarning {
 // skipped by its immutable commit id. derive() then runs over closure ∪ tail —
 // the full record set — so every response is byte-identical to the full fold,
 // which stays the reference (and the silent fallback for any doubt).
+//
+// `at` is either a single record id (string form) or the FRONTIER array form
+// (docs/FRONTIER-CHECKPOINTS.md): the maximal applied records, whose covered
+// set is the union of their ancestor closures — for an auto-computed frontier
+// exactly the whole applied set. The collection below never inspects `at`: it
+// serves records from checkpoint.closure via the cover manifest, which the
+// runner built from the covered set however it was chosen, so collection is
+// closure-agnostic; only deriveDelta (which re-verifies root + state over the
+// stored closure) interprets `at`, and PR 1 taught it both forms.
 // ---------------------------------------------------------------------------
 
 interface StoredCheckpoint extends Checkpoint {
@@ -306,6 +315,27 @@ function repoUpdatedAt(meta: RepoMeta): string | null {
   return typeof v === "string" ? v : null;
 }
 
+// A checkpoint's `at` is structurally either the string form (one record id)
+// or the frontier array form: a non-empty array of DISTINCT string ids
+// (docs/FRONTIER-CHECKPOINTS.md). Writers emit the string form whenever the
+// frontier has one member, so files the runner produces carry the array form
+// only for |F| >= 2; the reader accepts any non-empty duplicate-free array —
+// a one-member array is the one-member special case and deriveDelta verifies
+// it exactly like the string form. Anything else (empty array, duplicate or
+// non-string members, a non-string scalar) is malformed: no checkpoint, the
+// full fold runs. This mirrors the fold's frontierMembers rejection set, so
+// the read path fails safe the same way at every layer.
+function checkpointAtOk(at: unknown): boolean {
+  if (typeof at === "string") return true;
+  if (!Array.isArray(at) || at.length === 0) return false;
+  const seen = new Set<string>();
+  for (const m of at) {
+    if (typeof m !== "string" || seen.has(m)) return false;
+    seen.add(m);
+  }
+  return true;
+}
+
 async function readCheckpoint(
   repo: ArtifactsRepo,
 ): Promise<StoredCheckpoint | null> {
@@ -320,7 +350,7 @@ async function readCheckpoint(
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const c = parsed as { [k: string]: unknown };
   if (
-    typeof c.at !== "string" ||
+    !checkpointAtOk(c.at) ||
     typeof c.closureRoot !== "string" ||
     typeof c.state !== "object" ||
     c.state === null ||

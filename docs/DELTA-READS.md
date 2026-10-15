@@ -30,8 +30,17 @@ has no `checkpoint.json`, the read path is exactly today's full fold.
 }
 ```
 
-The runner places the checkpoint at the applied record with the **largest
-closure** (most coverage) unless `--at` names one.
+`at` has two forms. The **string form** above pins one record's ancestor
+closure. The **frontier form** (`docs/FRONTIER-CHECKPOINTS.md`) names a SET of
+records — the maximal applied records — and pins the union of their closures:
+`"at": ["t40", "t50", "t60", "witness-1"]`, with `"v": 3`. Writers emit the
+string form whenever the frontier has one member (a one-member frontier is
+byte-identical to the single-record checkpoint at that record), so the array
+form always means |F| ≥ 2 in files the runner produces. Readers dispatch
+structurally on the form of `at`, never on `v`.
+
+The runner now writes a **frontier checkpoint by default**; `--at ID` keeps
+the single-record placement.
 
 ## The read path
 
@@ -59,6 +68,44 @@ Finally `deriveDelta(checkpoint, tail)` (in `src/fold.ts`, refereed against
 is the full current record set, its output is **byte-identical to the full
 fold**. The JSON body carries no new fields; an `x-gitpp-derivation: delta|full`
 response header reports which path ran.
+
+## Frontier checkpoints — coverage stops being topology luck
+
+A single-record checkpoint covers one record's ancestor closure: one strand
+of the project. On a wide, parallel project — the topology this system is
+for — the largest single closure can be a minority of the record set
+(poc-scale-1: 21 of 62), so most repos stay tail on every read and the
+measured live latency barely moved. A **frontier checkpoint** fixes the
+coverage, not the machinery: the covered set is the union of the frontier
+members' closures, and for the auto-computed frontier (the maximal applied
+records) that union is provably **exactly derive's applied set** — the pinned
+`state` is the project's full derived state, and the only records that can
+never be covered are the ones no checkpoint can cover (orphans and cycle
+members, tail forever under any scheme).
+
+Nothing else changes. The collection is closure-agnostic — it serves records
+from the stored `closure` via the cover manifest, however the closure was
+chosen — and `deriveDelta`'s fallback rules are the same, with the covered
+set now C instead of a singleton closure. Verification generalises with the
+same three-way verdict (`VERIFIED` / `STATE-ONLY` / `MISMATCH`); the
+frontier verdict table — including why descendant growth stays `VERIFIED`
+and why ancestor-direction growth is impossible for an honestly created
+frontier — is in `docs/FRONTIER-CHECKPOINTS.md`. Staleness costs exactly
+the appends since creation: coverage does not rot, the absolute saving is
+pinned at creation, and refresh is just another `pp.py checkpoint` run.
+
+**Expected live effect — an expectation, not a promise.** With n appends
+since the checkpoint, a frontier read costs ≈ **6 + 2n** binding calls
+(2 `list` + `get` + `log` + the checkpoint read + the carrying commit's
+null read, then 2 per tail repo) against the full fold's 6 + 2|C| + 2n.
+What remains after the fan-out is gone is the **serial prefix** — four
+strictly serial substrate calls that no checkpoint shape can remove — which
+the design note prices at roughly half of poc-scale-1's 2.42 s full-fold
+read, for an expected landing band of ≈ **1.3–1.8 s** live. That band comes
+from `research/deep/frontier-checkpoints.md` §4's arithmetic, not from a
+measurement of this wiring; it gets re-measured against the live project
+when the wiring is deployed, and should not be quoted as a result until
+then.
 
 ## Correctness — the full fold stays the reference
 
@@ -99,10 +146,15 @@ the covered task repos cost neither a `get` nor a `readFile`.
 | poc-quilt-1 (closure 5/8 @ task-c) | 9 | 4 |
 | poc-scale-1 — frozen fixture (closure 21/62) | 63 | 42 |
 | poc-scale-1 — live chain (closure 61/62 @ t60) | ~63 | **~3** |
+| poc-scale-1 — frontier fixture (closure 62/62) | 63 | **1** |
 
 (Counts from `tests/worker-delta.mjs`; the live chain figure is the same
 arithmetic at the live topology — one project `get`/`log`, the two project
-commits, the checkpoint, and the single off-chain witness as tail.) The win
+commits, the checkpoint, and the single off-chain witness as tail. The
+frontier count is the mock's: there the checkpoint rides the project repo's
+main ref, so the single readFile is checkpoint.json itself; a live read
+adds one null `readFile` for the commit that carries checkpoint.json —
+the ≈6-call serial prefix counted in the frontier section above.) The win
 grows with closure coverage and with project size; a freshly-appended task is
 tail, so an append keeps the delta path active and reads only the new record.
 
@@ -111,7 +163,7 @@ tail, so an append keeps the delta path active and reads only the new record.
 No new routes, no binding changes — the Worker upload is exactly as in
 `DEPLOY.md` (multipart upload of the bundle with the artifacts + KV bindings in
 the metadata, then re-set the `ADMIN_KEY` secret). After deploying, create the
-checkpoints:
+checkpoints (frontier form by default; `--at` for a single-record one):
 
 ```
 pp.py checkpoint poc-quilt-1
