@@ -9,7 +9,7 @@ git.pp is a Git platform where multiple agents work on one project concurrently:
 
 **▶ Watch the demo (6:12)** — the full walkthrough on the live system: the race, the override inheritance, the arrival-order invariance proof:
 
-https://github.com/SuperInstance/git.pp-ng/blob/main/demo/gitpp-demo.mp4
+https://github.com/patchwork-quilt/git.pp-ng/blob/main/demo/gitpp-demo.mp4
 
 (The file also lives in this repo at `demo/gitpp-demo.mp4`.)
 
