@@ -354,6 +354,91 @@ def verify_checkpoint(records, checkpoint):
     return "VERIFIED" if actual_root == str(expected_root) else "STATE-ONLY"
 
 
+# --------------------------------------------------------------------------
+# delta derivation (checkpoint + tail) — the read-path optimisation.
+# A checkpoint pins a record's ancestor closure (state + closure root +
+# the closure records themselves). The read path can then re-derive without
+# re-reading the closure: supply the checkpoint and only the TAIL (records
+# outside the closure), and derive() runs over closure ∪ tail — which is the
+# full record set, so the result is byte-identical to derive(all). The win is
+# entirely on READS (the closure is not re-read); the fold itself is unchanged.
+# --------------------------------------------------------------------------
+
+def build_checkpoint(records, at):
+    """Construct a checkpoint for `at` over `records`, or None if `at`'s closure
+    is incomplete (no valid checkpoint there). The closure records are emitted
+    in canonical (code-point id) order so both ports build an identical object."""
+    idx = _index(records)
+    at = str(at)
+    if at not in idx:
+        return None
+    parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    closure = _closure_ids(at, idx, parents)
+    if closure is None:
+        return None
+    closure_records = [idx[rid] for rid in sorted(closure)]
+    return {
+        "at": at,
+        "state": derive(closure_records)["state"],
+        "closureRoot": checkpoint_root(records, at),
+        "closure": closure_records,
+    }
+
+
+def derive_delta(checkpoint, tail_records):
+    """Delta derivation: reconstruct the full record set from a checkpoint's
+    stored closure plus the freshly-read `tail_records`, then derive() it.
+    Returns a derive()-shaped dict, or None to signal "fall back to the full
+    fold" — the full fold stays the reference implementation.
+
+    None (fall back) on any doubt about the checkpoint or the partition:
+      * a malformed checkpoint, or a duplicate id within the stored closure;
+      * the stored closure is not exactly `at`'s ancestor closure (extra or
+        missing records), or its recomputed root != the pinned closureRoot
+        (tampered / stale checkpoint);
+      * deriving the closure does not reproduce the pinned state (not VERIFIED);
+      * a tail record shares an id with the closure (ambiguous partition).
+
+    When it returns a dict, that dict equals derive(closure ∪ tail) exactly —
+    and since a well-formed caller passes tail = (all current records) minus the
+    closure, that is derive(all current records), byte-for-byte."""
+    if not isinstance(checkpoint, dict):
+        return None
+    at = checkpoint.get("at")
+    want = checkpoint.get("state")
+    expected_root = checkpoint.get("closureRoot")
+    closure = checkpoint.get("closure")
+    if (at is None or not isinstance(want, dict)
+            or not isinstance(expected_root, str) or not isinstance(closure, list)):
+        return None
+    at = str(at)
+    closure_ids = set()
+    for r in closure:
+        if not isinstance(r, dict) or not isinstance(r.get("id"), str):
+            return None
+        if r["id"] in closure_ids:
+            return None  # duplicate id in the closure — ambiguous
+        closure_ids.add(r["id"])
+    if at not in closure_ids:
+        return None
+    # The stored closure must be exactly `at`'s ancestor closure within itself
+    # (no extra, no missing), and its root must match the pinned value.
+    idx = _index(closure)
+    parents = {rid: _parents(rec) for rid, rec in idx.items()}
+    cl = _closure_ids(at, idx, parents)
+    if cl is None or cl != closure_ids:
+        return None
+    if checkpoint_root(closure, at) != expected_root:
+        return None
+    if derive(closure)["state"] != {k: _canon_num(v) for k, v in want.items()}:
+        return None
+    # The tail must be disjoint from the closure by id.
+    for r in tail_records:
+        if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"] in closure_ids:
+            return None
+    return derive(list(closure) + list(tail_records))
+
+
 def witness_freshness(records):
     """Per-witness staleness, as a record-count distance.
 
