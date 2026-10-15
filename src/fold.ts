@@ -242,6 +242,20 @@ function cmpCodePoints(a: string, b: string): number {
   return ai.length - bi.length;
 }
 
+/** Canonical-order key for one record: pyCanonical of the record with any
+ * `digest` field removed. Format v2 (docs/FORMAT-V2.md): the digest is a
+ * claim ABOUT a record, never content the fold may consult, so it must not
+ * decide duplicate-id resolution — attaching, removing, or corrupting a
+ * digest cannot change which twin the fold keeps. Mirrors the referee's
+ * _index_sort_key. For a record without a digest (every v1 record) the key
+ * is byte-identical to the historical one. */
+function indexKey(rec: FoldRecord): string {
+  if (!("digest" in rec)) return pyCanonical(rec);
+  const rest: { [k: string]: unknown } = { ...rec };
+  delete rest.digest;
+  return pyCanonical(rest);
+}
+
 /** id -> record, built in the same canonical order the Python referee
  * uses, so input permutation (and duplicate-id resolution) cannot differ. */
 function indexRecords(
@@ -255,7 +269,7 @@ function indexRecords(
     // Secondary key: Python sorts by json.dumps(..., sort_keys=True), which
     // ensure_ascii escapes to pure ASCII; pyCanonical matches byte-for-byte,
     // so a code-point compare here is identical to Python's.
-    return cmpCodePoints(pyCanonical(a), pyCanonical(b));
+    return cmpCodePoints(indexKey(a), indexKey(b));
   });
   const idx: { [id: string]: FoldRecord } = {};
   for (const r of ordered) {
@@ -815,7 +829,7 @@ function sha256Hex(input: string): string {
  * derived state is MISMATCH, and a reason re-version (which the fold ignores,
  * so derived state is unchanged) is STATE-ONLY rather than a silent VERIFIED.
  * Mirrors the referee's _record_leaf. */
-function recordLeaf(rec: FoldRecord): string {
+export function recordLeaf(rec: FoldRecord): string {
   const r = rec as { id?: unknown; kind?: unknown; reason?: unknown };
   const normalized = {
     id: String(r.id ?? ""),

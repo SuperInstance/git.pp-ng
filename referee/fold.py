@@ -64,11 +64,25 @@ def _canonical_record(rec):
     return out
 
 
+def _index_sort_key(r):
+    """Canonical-order key for one record: its whole-record serialisation
+    with any `digest` field removed. Format v2 (docs/FORMAT-V2.md): the
+    digest is a claim ABOUT a record, never content the fold may consult,
+    so it must not decide the one place a whole-record serialisation picks
+    a winner — duplicate-id resolution. Attaching, removing, or corrupting
+    a digest therefore cannot change which twin the fold keeps. For a
+    record without a digest (every v1 record) the key is byte-identical
+    to the historical one."""
+    if isinstance(r, dict) and "digest" in r:
+        r = {k: v for k, v in r.items() if k != "digest"}
+    return json.dumps(r, sort_keys=True, default=str)
+
+
 def _index(records):
     """id -> record, built in a canonical order so input permutation cannot matter."""
     ordered = sorted(
         records,
-        key=lambda r: (str(r.get("id", "")), json.dumps(r, sort_keys=True, default=str)),
+        key=lambda r: (str(r.get("id", "")), _index_sort_key(r)),
     )
     return {str(r["id"]): r for r in ordered}
 

@@ -122,6 +122,13 @@ live inside the tool the agent already runs, and the fold is unchanged.
 
 Run the refusal tests (pure, no network): `python3 runner/test_refusals.py`.
 
+**Format v2:** after the refusals pass, `complete` writes the record with a
+`digest` field — `"sha256:"` + the checkpoint-v2 record leaf of its content,
+computed by the referee's leaf implementation (never reimplemented here).
+The fold never reads the field; it is the record's born integrity claim,
+verified at collection time by the Worker (`docs/FORMAT-V2.md`). Run the
+writer tests (pure, no network): `python3 runner/test_digest.py`.
+
 ## The scene — `bash scene.sh`
 
 One command, a fresh project `demo-<random suffix>` every run

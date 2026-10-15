@@ -32,6 +32,13 @@ Refusals (checked before anything is pushed — the fold is unchanged):
     the key, or to record a witness first and let the human rule.
   * a witness carrying non-observation effect keys is warned (stderr), never
     refused — a witness reporting measured state (env.*) is legal.
+
+  Records are written in format v2 (docs/FORMAT-V2.md): after the refusals,
+  at the single record.json write point, the record is born with a `digest`
+  field — "sha256:" + the checkpoint-v2 record leaf of its content,
+  computed by the referee's leaf implementation (referee/fold.py), never
+  reimplemented here. The fold never reads the field; it is an integrity
+  claim readers may verify, not an input to derivation.
   pp.py state <project>                      derived state + conflicts
   pp.py verify <project> --at ID [--tamper]  checkpoint check against the
                                              Python referee (../poc)
@@ -513,6 +520,39 @@ def project_records(project):
     return out.get("records") or []
 
 
+# --------------------------------------------------------------------------
+# format v2: records born with digests (docs/FORMAT-V2.md)
+# --------------------------------------------------------------------------
+
+def born_digest(record):
+    """The record's format-v2 digest: "sha256:" + the checkpoint-v2 record
+    leaf of its content. The leaf comes from the referee's implementation
+    ONLY (referee/fold.py `_record_leaf`, via _load_poc) — the digest
+    dialect (five-field projection, canonical JSON, float64 domain) is
+    inherited, never reimplemented here, so a runner-written digest cannot
+    drift from the dialect checkpoints and the Worker verify against. The
+    leaf does not cover the `digest` field itself."""
+    fold, _poc_pp = _load_poc()
+    return "sha256:" + fold._record_leaf(record)
+
+
+def attach_digest(record):
+    """Return the record with a correct born digest as a sibling field.
+
+    A record already carrying the correct digest keeps it (the same object
+    is returned — its bytes, field order included, are untouched); an
+    absent, malformed, or stale claim is replaced by the digest of the
+    content actually being written. This runs only on a record about to be
+    written by `complete` — history is never rewritten."""
+    want = born_digest(record)
+    cur = record.get("digest")
+    if isinstance(cur, str) and cur == want:
+        return record
+    out = dict(record)
+    out["digest"] = want
+    return out
+
+
 def cmd_complete(args):
     effects = {}
     for kv in args.sets or []:
@@ -582,6 +622,9 @@ def cmd_complete(args):
                     shutil.copytree(item, target, dirs_exist_ok=True)
                 else:
                     shutil.copy2(item, target)
+        # Format v2: the record is born with its digest. Computed here —
+        # after every refusal above, at the single record.json write point.
+        record = attach_digest(record)
         (dest / "record.json").write_text(json.dumps(record, indent=2) + "\n")
         git(["add", "-A"], env, cwd=dest)
         git([*GIT_IDENT, "commit", "-q", "-m", f"record {args.id}"], env, cwd=dest)
