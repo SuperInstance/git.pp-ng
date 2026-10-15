@@ -18,11 +18,11 @@ https://github.com/SuperInstance/git.pp-ng/blob/main/demo/gitpp-demo.mp4
 Everything claimed below is checkable from a cold clone — no Cloudflare account, no admin key:
 
 ```sh
-cd conformance && python3 harness.py
+(cd conformance && python3 harness.py)
 python3 runner/pp.py state poc-quilt-1
 ```
 
-The harness ends with **863/863 cases identical** — the TypeScript fold in `src/fold.ts` against the Python referee in `referee/fold.py`, plus 1,029 checkpoint probes, 3,231 witness-freshness checks, 16,290 closure-root digests, 2,812 oracle checks, 3 transport pins, and 8 live-golden checks, all passing. (`npm test` runs the same harness.) The runner reads the live demo project and prints `config.timeout = 45` — conflict winner **override-1**, losers task-a, task-b, task-d preserved, orphans none.
+The harness's last line is the totals line: **863/863 cases identical … — all pass**. (`npm test` runs the same harness.) The runner reads the live demo project and prints the one-line state summary: `config.timeout = 45`.
 
 ## Mechanism
 
