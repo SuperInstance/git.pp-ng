@@ -2,6 +2,13 @@
   "name": "git.pp-ng",
   "private": true,
   "scripts": {
-    "test": "cd conformance && python3 harness.py"
+    "test": "npm run test:conformance && npm run test:worker && npm run test:runner",
+    "test:conformance": "cd conformance && python3 harness.py && node differential.ts cases.json && python3 prod_scale.py --sizes 62,250,1000",
+    "test:worker": "node tests/worker-delta.mjs && node tests/security-probes.mjs && node tests/format-v2.mjs",
+    "test:runner": "python3 runner/test_refusals.py && python3 runner/test_digest.py",
+    "test:live": "node tests/integration.mjs"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

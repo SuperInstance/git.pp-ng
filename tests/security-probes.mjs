@@ -2,7 +2,7 @@
  * security-probes.mjs — black-box probes of the Worker's security surface,
  * run against the real module with mock bindings (no network, no deploy).
  *
- *   bun tests/security-probes.mjs [path-to-worker.ts]
+ *   node tests/security-probes.mjs [path-to-worker.ts]   (Node 22.18+, or bun)
  *
  * Exit code 0 iff every probe's expectation for the CURRENT code holds.
  * The expectations encode the hardened behaviour; run against a pre-fix
