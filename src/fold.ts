@@ -110,17 +110,24 @@ function pyFloatRepr(n: number): string {
 
 function pyNumber(n: number): string {
   // JS numbers do not distinguish int from float after JSON.parse, so this
-  // reproduces Python's json.dumps number rendering (after the referee's
-  // _leaf_num, which spells an integral value within |v| < 1e21 as a plain
-  // integer). An integral value in that band takes the EXACT integer spelling
-  // via BigInt — `String(n)` would give the shortest round-trip, which diverges
-  // from Python's int() for integral doubles in [1e16, 1e21) (e.g.
-  // 724818294626474393600, not ...400000). Zero (incl. -0) is "0"; everything
-  // else (non-integral, or |v| >= 1e21) goes through Python float repr.
+  // reproduces the referee's _leaf_num, which spells an integral value within
+  // |v| < 1e16 as a plain integer.
+  //
+  // The boundary is 1e16, NOT 1e21. An integral value at or above 1e16 does
+  // not fit int64, and spelling it as exact integer digits claims a precision
+  // the float64 does not have: 1e18 is exactly 1000000000000000000 as a double,
+  // but the spec requires the shortest round-trip, scientific. This line said
+  // 1e21 and diverged from all five leaf ports on 448 of 20,043 corpus
+  // records -- see patchwork-quilt/git.pp-ng#28.
+  //
+  // Within the band BigInt is the right spelling: String(n) would give the
+  // shortest round-trip and diverge the other way (9007199254740992, not
+  // 9007199254740992.0). Zero (incl. -0) is "0"; everything else
+  // (non-integral, or |v| >= 1e16) goes through Python float repr.
   if (Number.isNaN(n)) return "NaN";
   if (!Number.isFinite(n)) return n > 0 ? "Infinity" : "-Infinity";
   if (n === 0) return "0";
-  if (Number.isInteger(n) && Math.abs(n) < 1e21) return BigInt(n).toString();
+  if (Number.isInteger(n) && Math.abs(n) < 1e16) return BigInt(n).toString();
   return pyFloatRepr(n);
 }
 
